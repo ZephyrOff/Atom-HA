@@ -40,6 +40,7 @@ fn parse_args() -> RunCfg {
         trusted_ip: env("ATOM_TRUSTED_IP"),
         advertise_url: env("ATOM_ADVERTISE_URL"),
         log_retention: env("ATOM_LOG_RETENTION").and_then(|v| v.parse().ok()).unwrap_or(100_000),
+        allowed_origins: env("ATOM_ALLOWED_ORIGINS").map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()).unwrap_or_default(),
         trusted_proxies: env("ATOM_TRUSTED_PROXIES").map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()).unwrap_or_default(),
     };
     let mut args = std::env::args().skip(1);
@@ -53,11 +54,12 @@ fn parse_args() -> RunCfg {
             "--password" => cfg.password = Some(val()),
             "--trusted-ip" => cfg.trusted_ip = Some(val()),
             "--advertise-url" => cfg.advertise_url = Some(val()),
+            "--allowed-origins" => cfg.allowed_origins = val().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
             "--trusted-proxies" => cfg.trusted_proxies = val().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
             "-h" | "--help" => {
                 println!(
                     "Atom {}\n\nOptions (ou variables ATOM_*) :\n  --data-dir <dir>        dossier de données (ATOM_DATA_DIR, défaut ./data)\n  --dns-listen <addr>     écoute DNS (ATOM_DNS_LISTEN, défaut 0.0.0.0:53)\n  --http-listen <addr>    écoute web/API (ATOM_HTTP_LISTEN, défaut 0.0.0.0:3000)\n  --node-name <nom>       nom du nœud (ATOM_NODE_NAME)\n  --password <mdp>        mot de passe admin (ATOM_PASSWORD)\n  --trusted-ip <ip>       IP admise sans mot de passe, ex. ingress Home Assistant (ATOM_TRUSTED_IP)\n  --advertise-url <url>   URL de ce nœud visible par les autres (ATOM_ADVERTISE_URL)
-  --trusted-proxies <ips> IP de reverse proxies autorisés à fournir X-Forwarded-For (ATOM_TRUSTED_PROXIES)",
+  --trusted-proxies <ips> IP de reverse proxies autorisés à fournir X-Forwarded-For (ATOM_TRUSTED_PROXIES)\n  --allowed-origins <urls> origines acceptées en plus de l'adresse d'accès (ATOM_ALLOWED_ORIGINS)",
                     state::VERSION
                 );
                 std::process::exit(0);

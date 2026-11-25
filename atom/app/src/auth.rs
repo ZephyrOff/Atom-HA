@@ -178,6 +178,18 @@ impl Auth {
         None
     }
 
+    /// Lève le blocage d'une adresse, ou de toutes si `ip` est vide. Retourne le nombre d'adresses débloquées.
+    pub fn unlock(&self, ip: &str) -> usize {
+        let mut g = self.ips.lock();
+        if ip.is_empty() {
+            let n = g.len();
+            g.clear();
+            n
+        } else {
+            usize::from(g.remove(ip).is_some())
+        }
+    }
+
     pub fn success(&self, ip: &str) {
         self.ips.lock().remove(ip);
     }
@@ -269,6 +281,19 @@ mod tests {
         assert!(a.locked("5.6.7.8").is_none());
         a.success("1.2.3.4");
         assert!(a.locked("1.2.3.4").is_none());
+    }
+
+    #[test]
+    fn unlock_resets_counters() {
+        let a = Auth::default();
+        for _ in 0..=FREE_FAILURES {
+            a.failure("1.2.3.4");
+        }
+        a.failure("5.6.7.8");
+        assert!(a.locked("1.2.3.4").is_some());
+        assert_eq!(a.unlock("1.2.3.4"), 1);
+        assert!(a.locked("1.2.3.4").is_none());
+        assert_eq!(a.unlock(""), 1);
     }
 
     #[test]

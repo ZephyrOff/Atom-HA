@@ -57,6 +57,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/auth/password", post(change_password))
         .route("/api/auth/revoke-others", post(revoke_others))
         .route("/api/auth/events", get(auth_events))
+        .route("/api/auth/unlock", post(auth_unlock))
         .route("/api/info", get(info))
         .route("/api/c/{col}", get(list_col).post(create))
         .route("/api/c/{col}/{id}", put(update).delete(remove))
@@ -146,15 +147,46 @@ fn too_many(wait: Duration) -> Response {
         .into_response()
 }
 
-/// Une requête qui modifie l'état doit venir de l'interface elle-même.
-fn csrf_ok(h: &HeaderMap) -> bool {
-    if let Some(origin) = h.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        let host = h.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
-        if origin.split_once("://").map_or(true, |(_, rest)| rest != host) {
-            return false;
+/// Une requête qui modifie l'état doit venir de l'interface elle-même : en-tête `x-atom` présent et,
+/// si le navigateur envoie `Origin`, une origine qui correspond à l'adresse utilisée pour joindre Atom.
+/// En HTTP/2 il n'y a pas d'en-tête `Host` (l'adresse est dans l'URI) ; derrière un reverse proxy déclaré,
+/// `X-Forwarded-Host` est aussi accepté.
+fn csrf_check(h: &HeaderMap, uri_host: Option<&str>, via_proxy: bool, allowed: &[String]) -> Result<(), String> {
+    if h.get("x-atom").is_none() {
+        return Err("requête refusée : l'en-tête « x-atom » est absent (l'interface l'envoie ; un script doit utiliser un jeton d'API)".into());
+    }
+    let Some(origin) = h.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
+        return Ok(());
+    };
+    if allowed.iter().any(|a| a.trim().trim_end_matches('/').eq_ignore_ascii_case(origin)) {
+        return Ok(());
+    }
+    let (scheme, rest) = origin.split_once("://").unwrap_or(("", ""));
+    let mut hosts: Vec<String> = Vec::new();
+    if let Some(v) = h.get(header::HOST).and_then(|v| v.to_str().ok()) {
+        hosts.push(v.to_string());
+    }
+    if let Some(v) = uri_host {
+        hosts.push(v.to_string());
+    }
+    if via_proxy {
+        if let Some(v) = h.get("x-forwarded-host").and_then(|v| v.to_str().ok()) {
+            hosts.extend(v.split(',').map(|x| x.trim().to_string()));
         }
     }
-    h.get("x-atom").is_some()
+    let default_port = if scheme == "https" { ":443" } else { ":80" };
+    let ok = !rest.is_empty()
+        && hosts.iter().any(|x| {
+            x.eq_ignore_ascii_case(rest) || x.strip_suffix(default_port).map_or(false, |y| y.eq_ignore_ascii_case(rest)) || rest.strip_suffix(default_port).map_or(false, |y| y.eq_ignore_ascii_case(x))
+        });
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "requête refusée : l'origine « {origin} » ne correspond pas à l'adresse « {} » utilisée pour joindre Atom. Derrière un reverse proxy, déclare-le (--trusted-proxies) ou autorise cette origine (ATOM_ALLOWED_ORIGINS).",
+            hosts.first().cloned().unwrap_or_default()
+        ))
+    }
 }
 
 fn add_security_headers(h: &mut HeaderMap, ingress: bool) {
@@ -201,7 +233,8 @@ async fn gate(app: &Arc<App>, mut req: Request, next: Next, peer: Option<SocketA
         let st = app.node.lock().tls.clone();
         let port = *app.tls_listening.lock();
         if let (true, Some(port)) = (st.redirect_http, port) {
-            let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
+            let uri_auth = req.uri().authority().map(|a| a.as_str().to_string()).unwrap_or_default();
+            let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or(&uri_auth);
             let bare = host.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map_or(host, |(h, _)| h);
             let target = if st.hostname.is_empty() { bare.to_string() } else { st.hostname.clone() };
             let pq = req.uri().path_and_query().map_or("/", |p| p.as_str());
@@ -268,8 +301,12 @@ async fn gate(app: &Arc<App>, mut req: Request, next: Next, peer: Option<SocketA
         };
     }
 
-    if !ingress && unsafe_method && !csrf_ok(&headers) {
-        return (StatusCode::FORBIDDEN, Json(json!({"error": "requête refusée (origine)"}))).into_response();
+    if !ingress && unsafe_method {
+        let uri_host = req.uri().authority().map(|a| a.as_str().to_string());
+        let via_proxy = peer.map_or(false, |p| is_trusted_proxy(app, &p));
+        if let Err(m) = csrf_check(&headers, uri_host.as_deref(), via_proxy, &app.cfg.allowed_origins) {
+            return (StatusCode::FORBIDDEN, Json(json!({"error": m}))).into_response();
+        }
     }
 
     let public = PUBLIC.contains(&path.as_str());
@@ -450,6 +487,19 @@ async fn change_password(
 async fn revoke_others(State(app): State<Arc<App>>, headers: HeaderMap) -> Res {
     app.auth.revoke_others(session_token(&headers).as_deref());
     Ok(Json(json!({"ok": true})))
+}
+
+#[derive(Deserialize, Default)]
+struct UnlockReq {
+    /// Adresse à débloquer ; vide ou absente = toutes.
+    ip: Option<String>,
+}
+
+async fn auth_unlock(State(app): State<Arc<App>>, Extension(actor): Extension<Actor>, Json(r): Json<UnlockReq>) -> Res {
+    let ip = r.ip.unwrap_or_default();
+    let n = app.auth.unlock(ip.trim());
+    app.auth.event(if ip.is_empty() { "toutes" } else { ip.trim() }, "unlock", &format!("débloquée par {}", actor.0));
+    Ok(Json(json!({"ok": true, "unlocked": n})))
 }
 
 async fn auth_events(State(app): State<Arc<App>>, headers: HeaderMap) -> Res {

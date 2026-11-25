@@ -10,6 +10,7 @@ export ATOM_TRUSTED_IP=172.30.32.2
 export ATOM_PASSWORD="$(bashio::config 'password')"
 export ATOM_NODE_NAME="$(bashio::config 'node_name')"
 export ATOM_ADVERTISE_URL="$(bashio::config 'advertise_url')"
+export ATOM_ALLOWED_ORIGINS="$(bashio::config 'allowed_origins')"
 export ATOM_LOG_RETENTION="$(bashio::config 'log_retention')"
 export RUST_LOG="atom=info"
 

@@ -568,7 +568,7 @@ pages.security = async function (token) {
   if (token !== routeToken) return;
   const KIND = {
     login_ok: ['Connexion réussie', 'ok'], login_fail: ['Échec de connexion', 'bad'], locked: ['Adresse bloquée', 'warn'],
-    sync_fail: ['Échec côté cluster', 'warn'], password_changed: ['Mot de passe modifié', 'acc'], logout: ['Déconnexion', ''],
+    sync_fail: ['Échec côté cluster', 'warn'], unlock: ['Adresse débloquée', 'acc'], password_changed: ['Mot de passe modifié', 'acc'], logout: ['Déconnexion', ''],
   };
   const when = ms => new Date(ms).toLocaleString('fr-FR');
   main.innerHTML = `<div class="head"><div><h1>Sécurité</h1><p>Compte administrateur, sessions ouvertes et tentatives de connexion récentes.</p></div></div>
@@ -587,7 +587,7 @@ pages.security = async function (token) {
         <div class="tblwrap"><table><thead><tr><th>Adresse</th><th>Ouverte</th><th>Dernière activité</th><th></th></tr></thead><tbody>
         ${ev.sessions.length ? ev.sessions.map(s => `<tr><td class="mono">${esc(s.ip)}</td><td>${when(s.created)}</td><td>${ago(s.last_seen)}</td><td>${s.current ? '<span class="tag acc">cette session</span>' : ''}</td></tr>`).join('') : `<tr><td colspan="4" class="empty">${me.ingress ? 'Accès via Home Assistant, sans session propre' : 'Aucune session'}</td></tr>`}
         </tbody></table></div>
-        ${ev.locked.length ? `<h2 style="margin-top:16px">Adresses bloquées</h2><div class="tblwrap"><table><tbody>${ev.locked.map(l => `<tr><td class="mono">${esc(l.ip)}</td><td>encore ${l.seconds} s</td></tr>`).join('')}</tbody></table></div>` : ''}
+        ${ev.locked.length ? `<h2 style="margin-top:16px">Adresses bloquées <button class="btn sm" data-unlock="">Tout débloquer</button></h2><div class="tblwrap"><table><tbody>${ev.locked.map(l => `<tr><td class="mono">${esc(l.ip)}</td><td>encore ${l.seconds} s</td><td><button class="btn sm" data-unlock="${esc(l.ip)}">Débloquer</button></td></tr>`).join('')}</tbody></table></div>` : ''}
       </div>
     </div>
     <div class="card" style="margin-top:14px"><h2>Jetons d'API</h2>
@@ -616,6 +616,9 @@ pages.security = async function (token) {
   });
   main.onclick = guard(async e => {
     const t = e.target.closest('button'); if (!t) return;
+    if (t.dataset.unlock !== undefined) {
+      await api('POST', 'auth/unlock', { ip: t.dataset.unlock }); toast('Adresse débloquée'); pages.security(token); return;
+    }
     if (t.id === 'tkgo') {
       const r = await api('POST', 'tokens', { name: $('#tkname').value, scope: $('#tkscope').value, ips: $('#tkips').value.split(/[,\s]+/).filter(Boolean), expires_in_days: +$('#tkexp').value || undefined });
       window.__atomNewToken = r.token; toast('Jeton créé'); pages.security(token);

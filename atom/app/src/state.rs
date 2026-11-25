@@ -29,6 +29,8 @@ pub struct RunCfg {
     pub log_retention: usize,
     /// IP de reverse proxies dont on accepte l'en-tête X-Forwarded-For.
     pub trusted_proxies: Vec<String>,
+    /// Origines supplémentaires acceptées pour les requêtes de l'interface (ex. https://atom.exemple.fr).
+    pub allowed_origins: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
