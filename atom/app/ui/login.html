@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Connexion · Atom</title>
+<link rel="icon" type="image/png" href="logo.png">
+<script src="theme.js"></script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="loginbody">
+<button class="btn themebtn" id="theme" type="button" aria-label="Changer de thème"></button>
+<main class="logincard card">
+  <div class="loginhead">
+    <img src="logo.png" width="64" height="64" alt="">
+    <h1>Atom</h1>
+    <p class="muted">Connecte-toi pour gérer ce nœud.</p>
+  </div>
+  <form id="f" autocomplete="on">
+    <label class="lbl">Utilisateur
+      <input class="f" id="u" name="username" value="admin" autocomplete="username" required>
+    </label>
+    <label class="lbl">Mot de passe
+      <input class="f" id="p" name="password" type="password" autocomplete="current-password" required autofocus>
+    </label>
+    <div id="err" class="loginerr" role="alert" hidden></div>
+    <button class="btn pri" id="go" type="submit">Se connecter</button>
+  </form>
+  <p class="muted loginfoot">Trop d'échecs successifs bloquent l'adresse pendant une durée croissante.</p>
+</main>
+<script src="login.js"></script>
+</body>
+</html>

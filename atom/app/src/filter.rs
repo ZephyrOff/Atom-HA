@@ -48,7 +48,6 @@ struct RegexRule {
 
 #[derive(Default)]
 pub struct ParsedList {
-    pub id: String,
     pub name: String,
     pub count: usize,
     pub unsupported: usize,
@@ -118,8 +117,8 @@ fn parse_rewrite(v: &str) -> Option<Rw> {
 }
 
 impl ParsedList {
-    pub fn parse(id: &str, name: &str, text: &str) -> ParsedList {
-        let mut l = ParsedList { id: id.into(), name: name.into(), ..Default::default() };
+    pub fn parse(name: &str, text: &str) -> ParsedList {
+        let mut l = ParsedList { name: name.into(), ..Default::default() };
         for line in text.lines() {
             l.add_line(line.trim());
         }
@@ -365,7 +364,7 @@ mod tests {
     use std::sync::Arc;
 
     fn one(text: &str) -> Vec<Arc<ParsedList>> {
-        vec![Arc::new(ParsedList::parse("t", "test", text))]
+        vec![Arc::new(ParsedList::parse("test", text))]
     }
 
     #[test]

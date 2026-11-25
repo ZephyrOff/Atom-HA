@@ -2,7 +2,7 @@
 
 use crate::filter::ParsedList;
 use crate::model::ListCfg;
-use crate::state::{App, ListMeta};
+use crate::state::App;
 use crate::store::now_ms;
 use anyhow::{anyhow, bail, Result};
 use std::sync::Arc;
@@ -43,8 +43,8 @@ pub async fn refresh(app: &Arc<App>, id: &str, force: bool) -> Result<()> {
         let etag = resp.headers().get("etag").and_then(|v| v.to_str().ok()).map(String::from);
         let text = resp.text().await?;
         let parsed = {
-            let (id, name, text2) = (id.to_string(), cfg.name.clone(), text.clone());
-            tokio::task::spawn_blocking(move || ParsedList::parse(&id, &name, &text2)).await?
+            let (name, text2) = (cfg.name.clone(), text.clone());
+            tokio::task::spawn_blocking(move || ParsedList::parse(&name, &text2)).await?
         };
         if parsed.count == 0 {
             bail!("la liste ne contient aucune règle exploitable");

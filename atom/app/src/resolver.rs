@@ -1,5 +1,6 @@
-//! Traitement d'une requête DNS : zones, réécritures, filtrage, cache, upstreams.
+//! Traitement d'une requête DNS : réécritures, zones, accès réseau, filtrage, cache, upstreams.
 
+use crate::clients::{is_private, Identity};
 use crate::dnswire::{self, Query, Rr};
 use crate::engine::{Engine, RewriteEntry, RwAns};
 use crate::filter::{self, HitKind, Rw};
@@ -8,6 +9,7 @@ use crate::state::{App, CacheEntry};
 use crate::store::now_ms;
 use crate::upstream;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,8 +26,16 @@ fn out(resp: Vec<u8>, result: &'static str) -> Outcome {
     Outcome { resp, result, reason: String::new(), list: String::new(), upstream: String::new(), cached: false }
 }
 
+/// Refus lié au blocage d'accès réseau d'un client.
+fn deny(q: &Query, what: &str, who: &str) -> Outcome {
+    let mut o = out(dnswire::build_response(q, dnswire::RC_NXDOMAIN, false, &[], &[]), "blocked");
+    o.reason = format!("Accès {what} bloqué ({who})");
+    o.list = "Accès réseau".into();
+    o
+}
+
 /// Réponse pour une réécriture ou un blocage par adresse.
-async fn answer_rewrite(app: &Arc<App>, eng: &Engine, q: &Query, rw: &[RewriteEntry], ttl: u32) -> Vec<u8> {
+async fn answer_rewrite(app: &Arc<App>, eng: &Engine, q: &Query, rw: &[RewriteEntry], ttl: u32, ident: &Identity) -> Vec<u8> {
     let mut answers: Vec<Rr> = Vec::new();
     let mut cname: Option<String> = None;
     for e in rw {
@@ -38,7 +48,7 @@ async fn answer_rewrite(app: &Arc<App>, eng: &Engine, q: &Query, rw: &[RewriteEn
     }
     if let Some(c) = cname {
         answers.push(dnswire::rr_name(&q.name, dnswire::T_CNAME, ttl, &c));
-        answers.extend(resolve_addrs(app, eng, &c, q.qtype, 0).await);
+        answers.extend(resolve_addrs(app, eng, &c, q.qtype, 0, ident).await);
     }
     dnswire::build_response(q, 0, false, &answers, &[])
 }
@@ -71,13 +81,14 @@ pub fn resolve_addrs<'a>(
     name: &'a str,
     qtype: u16,
     depth: u8,
+    ident: &'a Identity,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Rr>> + Send + 'a>> {
     Box::pin(async move {
         if depth > 5 {
             return vec![];
         }
         let q = Query { id: 0, rd: true, name: name.to_string(), qtype, qclass: 1, qend: 0, edns_size: None };
-        if let Some(rw) = eng.rewrite_lookup(name, now_ms()) {
+        if let Some(rw) = eng.rewrite_lookup(name, now_ms(), ident) {
             let mut v = Vec::new();
             for e in rw {
                 match e.ans {
@@ -85,17 +96,17 @@ pub fn resolve_addrs<'a>(
                     RwAns::Ip(IpAddr::V6(ip)) if qtype == dnswire::T_AAAA => v.push(dnswire::rr_aaaa(name, 60, ip)),
                     RwAns::Cname(c) => {
                         v.push(dnswire::rr_name(name, dnswire::T_CNAME, 60, &c));
-                        v.extend(resolve_addrs(app, eng, &c, qtype, depth + 1).await);
+                        v.extend(resolve_addrs(app, eng, &c, qtype, depth + 1, ident).await);
                     }
                     _ => {}
                 }
             }
             return v;
         }
-        if let Some(z) = eng.zone_answer(&q) {
+        if let Some(z) = eng.zone_answer(&q, ident) {
             let mut v = z.answers;
             if let Some(t) = z.cname_target {
-                v.extend(resolve_addrs(app, eng, &t, qtype, depth + 1).await);
+                v.extend(resolve_addrs(app, eng, &t, qtype, depth + 1, ident).await);
             }
             return v;
         }
@@ -125,10 +136,12 @@ async fn forward_cached(app: &Arc<App>, eng: &Engine, q: &Query, req: &[u8]) -> 
             if e.expires > Instant::now() {
                 let mut d = e.data.clone();
                 dnswire::set_id(&mut d, q.id);
+                app.cache_hits.fetch_add(1, Ordering::Relaxed);
                 return Ok((d, "cache".into(), true));
             }
             c.remove(&key);
         }
+        app.cache_misses.fetch_add(1, Ordering::Relaxed);
     }
     let tmo = Duration::from_millis(eng.settings.timeout_ms);
     let parallel = eng.settings.upstream_mode == "parallel";
@@ -158,14 +171,23 @@ async fn forward_cached(app: &Arc<App>, eng: &Engine, q: &Query, req: &[u8]) -> 
 }
 
 /// Évalue une requête sans l'enregistrer dans le journal.
-pub async fn resolve(app: &Arc<App>, req: &[u8], q: &Query) -> Outcome {
+pub async fn resolve(app: &Arc<App>, req: &[u8], q: &Query, client: IpAddr) -> Outcome {
     let eng = app.engine.load_full();
     let now = now_ms();
+    let ident = eng.identify(client);
+    let acc = eng.access(&ident, now);
 
     // 1. réécritures
     if eng.settings.rewrites_enabled {
-        if let Some(rw) = eng.rewrite_lookup(&q.name, now) {
-            let resp = answer_rewrite(app, &eng, q, &rw, 60).await;
+        if let Some(rw) = eng.rewrite_lookup(&q.name, now, &ident) {
+            let lan = rw.iter().all(|e| matches!(&e.ans, RwAns::Ip(ip) if is_private(ip)));
+            if lan && acc.lan {
+                return deny(q, "LAN", &acc.who);
+            }
+            if !lan && acc.internet {
+                return deny(q, "Internet", &acc.who);
+            }
+            let resp = answer_rewrite(app, &eng, q, &rw, 60, &ident).await;
             let mut o = out(resp, "rewritten");
             o.reason = "réécriture DNS".into();
             return o;
@@ -173,11 +195,14 @@ pub async fn resolve(app: &Arc<App>, req: &[u8], q: &Query) -> Outcome {
     }
 
     // 2. zones locales
-    if let Some(z) = eng.zone_answer(q) {
+    if let Some(z) = eng.zone_answer(q, &ident) {
+        if acc.lan {
+            return deny(q, "LAN", &acc.who);
+        }
         let mut answers = z.answers;
         if let Some(t) = &z.cname_target {
             if q.qtype == dnswire::T_A || q.qtype == dnswire::T_AAAA {
-                answers.extend(resolve_addrs(app, &eng, t, q.qtype, 0).await);
+                answers.extend(resolve_addrs(app, &eng, t, q.qtype, 0, &ident).await);
             }
         }
         let resp = dnswire::build_response(q, z.rcode, true, &answers, &z.authority);
@@ -200,12 +225,12 @@ pub async fn resolve(app: &Arc<App>, req: &[u8], q: &Query) -> Outcome {
                 HitKind::Rewrite(rw) => {
                     let mut o = match &rw {
                         Rw::Ip(ip) => {
-                            let e = [RewriteEntry { ans: RwAns::Ip(*ip), expires: None }];
-                            out(answer_rewrite(app, &eng, q, &e, 60).await, "rewritten")
+                            let e = [RewriteEntry::global(RwAns::Ip(*ip))];
+                            out(answer_rewrite(app, &eng, q, &e, 60, &ident).await, "rewritten")
                         }
                         Rw::Cname(c) => {
-                            let e = [RewriteEntry { ans: RwAns::Cname(c.clone()), expires: None }];
-                            out(answer_rewrite(app, &eng, q, &e, 60).await, "rewritten")
+                            let e = [RewriteEntry::global(RwAns::Cname(c.clone()))];
+                            out(answer_rewrite(app, &eng, q, &e, 60, &ident).await, "rewritten")
                         }
                         other => out(answer_block(&eng, q, Some(other)), "blocked"),
                     };
@@ -221,9 +246,38 @@ pub async fn resolve(app: &Arc<App>, req: &[u8], q: &Query) -> Outcome {
         }
     }
 
-    // 4. cache et upstreams
+    // 4. accès Internet bloqué pour ce client
+    if acc.internet {
+        return deny(q, "Internet", &acc.who);
+    }
+
+    // 5. cache et upstreams
     match forward_cached(app, &eng, q, req).await {
-        Ok((resp, up, cached)) => Outcome { resp, result: "allowed", reason, list, upstream: up, cached },
+        Ok((resp, up, cached)) => {
+            if acc.lan {
+                // Une réponse qui pointe vers le réseau local est refusée (comme une protection anti-rebinding).
+                let private = dnswire::response_info(&resp)
+                    .map(|i| {
+                        i.addrs.iter().any(|(t, rd, _)| {
+                            let ip = if *t == dnswire::T_A && rd.len() == 4 {
+                                Some(IpAddr::from([rd[0], rd[1], rd[2], rd[3]]))
+                            } else if *t == dnswire::T_AAAA && rd.len() == 16 {
+                                let mut b = [0u8; 16];
+                                b.copy_from_slice(rd);
+                                Some(IpAddr::from(b))
+                            } else {
+                                None
+                            };
+                            ip.map_or(false, |ip| is_private(&ip))
+                        })
+                    })
+                    .unwrap_or(false);
+                if private {
+                    return deny(q, "LAN", &acc.who);
+                }
+            }
+            Outcome { resp, result: "allowed", reason, list, upstream: up, cached }
+        }
         Err(e) => {
             let resp = dnswire::build_response(q, dnswire::RC_SERVFAIL, false, &[], &[]);
             Outcome { resp, result: "error", reason: e, list, upstream: String::new(), cached: false }
@@ -235,7 +289,7 @@ pub async fn resolve(app: &Arc<App>, req: &[u8], q: &Query) -> Outcome {
 pub async fn handle(app: &Arc<App>, req: &[u8], client: IpAddr) -> Option<Vec<u8>> {
     let q = dnswire::parse_query(req)?;
     let start = Instant::now();
-    let o = resolve(app, req, &q).await;
+    let o = resolve(app, req, &q, client).await;
     if app.engine.load().settings.log_enabled {
         let rcode = o.resp.get(3).map(|b| b & 0x0F).unwrap_or(0);
         app.qlog.append(LogEntry {

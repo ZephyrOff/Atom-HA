@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Atom</title>
 <link rel="icon" type="image/png" href="logo.png">
+<script src="theme.js"></script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -16,19 +17,26 @@
     </div>
     <nav id="nav">
       <a href="#dashboard" data-r="dashboard">Tableau de bord</a>
+      <a href="#clients" data-r="clients">Clients</a>
+      <a href="#access" data-r="access">Accès réseau</a>
       <a href="#log" data-r="log">Journal</a>
       <a href="#filters" data-r="filters">Filtres</a>
+      <a href="#cache" data-r="cache">Cache</a>
       <a href="#dns" data-r="dns">Paramètres DNS</a>
       <a href="#rewrites" data-r="rewrites">Réécritures</a>
       <a href="#rules" data-r="rules">Règles personnalisées</a>
       <a href="#records" data-r="records">Enregistrements</a>
       <a href="#cluster" data-r="cluster">Cluster</a>
+      <a href="#security" data-r="security">Sécurité</a>
     </nav>
     <div class="nodechip" id="nodechip">…</div>
+    <button class="btn" id="theme" type="button"></button>
+    <button class="btn" id="logout" type="button">Se déconnecter</button>
   </aside>
   <main id="main" tabindex="-1"></main>
 </div>
 <div id="toast" role="status" aria-live="polite"></div>
 <script src="app.js"></script>
+<script src="clients.js"></script>
 </body>
 </html>

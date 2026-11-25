@@ -66,6 +66,9 @@ pub struct RewriteCfg {
     pub answer: String,
     pub enabled: bool,
     pub expires_at: Option<u64>,
+    /// Ids de clients concernés (vide avec `groups` vide = tout le monde).
+    pub clients: Vec<String>,
+    pub groups: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -85,6 +88,31 @@ pub struct RecordCfg {
     pub ttl: u32,
     pub ptr: bool,
     pub enabled: bool,
+    pub clients: Vec<String>,
+    pub groups: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct ClientCfg {
+    pub name: String,
+    /// Adresses IP ou plages CIDR.
+    pub ids: Vec<String>,
+    pub group: String,
+    pub notes: String,
+    pub block_internet: bool,
+    pub block_lan: bool,
+    pub block_until: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct GroupCfg {
+    pub name: String,
+    pub description: String,
+    pub block_internet: bool,
+    pub block_lan: bool,
+    pub block_until: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -93,7 +121,7 @@ pub struct CustomRules {
     pub text: String,
 }
 
-pub const COLLECTIONS: &[&str] = &["settings", "upstreams", "lists", "rewrites", "zones", "records", "rules"];
+pub const COLLECTIONS: &[&str] = &["settings", "upstreams", "lists", "rewrites", "zones", "records", "rules", "clients", "groups"];
 
 pub fn norm_domain(s: &str) -> String {
     s.trim().trim_end_matches('.').to_ascii_lowercase()
@@ -223,6 +251,31 @@ pub fn validate(col: &str, v: Value) -> Result<Value, String> {
         "rules" => {
             let r: CustomRules = de(v)?;
             Ok(ser(&r))
+        }
+        "clients" => {
+            let mut c: ClientCfg = de(v)?;
+            c.name = c.name.trim().to_string();
+            c.ids = c.ids.iter().map(|i| i.trim().to_string()).filter(|i| !i.is_empty()).collect();
+            if c.name.is_empty() {
+                return Err("le nom est obligatoire".into());
+            }
+            if c.ids.is_empty() {
+                return Err("au moins une adresse IP ou plage CIDR est nécessaire".into());
+            }
+            for i in &c.ids {
+                if crate::clients::Cidr::parse(i).is_none() {
+                    return Err(format!("« {i} » n'est pas une adresse IP ni une plage CIDR valide"));
+                }
+            }
+            Ok(ser(&c))
+        }
+        "groups" => {
+            let mut g: GroupCfg = de(v)?;
+            g.name = g.name.trim().to_string();
+            if g.name.is_empty() {
+                return Err("le nom est obligatoire".into());
+            }
+            Ok(ser(&g))
         }
         _ => Err("collection inconnue".into()),
     }

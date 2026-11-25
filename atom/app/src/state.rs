@@ -3,12 +3,11 @@
 use crate::engine::Engine;
 use crate::filter::ParsedList;
 use crate::qlog::QLog;
-use crate::store::{now_ms, Store};
+use crate::store::Store;
 use crate::upstream::HealthMap;
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,6 +27,8 @@ pub struct RunCfg {
     pub trusted_ip: Option<String>,
     pub advertise_url: Option<String>,
     pub log_retention: usize,
+    /// IP de reverse proxies dont on accepte l'en-tête X-Forwarded-For.
+    pub trusted_proxies: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -42,6 +43,9 @@ pub struct NodeFile {
     pub node_id: String,
     pub name: String,
     pub cluster_token: String,
+    /// Hash Argon2id du mot de passe.
+    pub pw: Option<crate::auth::PwHash>,
+    /// Ancien format (SHA-256 salé), migré à la première connexion.
     pub pw_salt: String,
     pub pw_hash: String,
     pub advertise_url: String,
@@ -88,19 +92,17 @@ pub struct App {
     pub started: Instant,
     pub http: reqwest::Client,
     pub dns_ok: std::sync::atomic::AtomicBool,
+    pub auth: crate::auth::Auth,
+    pub cache_hits: std::sync::atomic::AtomicU64,
+    pub cache_misses: std::sync::atomic::AtomicU64,
+    /// Mot de passe imposé par la configuration (non modifiable dans l'interface).
+    pub pw_locked: bool,
 }
 
 pub fn random_hex(n: usize) -> String {
     let mut b = vec![0u8; n];
     let _ = getrandom::fill(&mut b);
     hex::encode(b)
-}
-
-pub fn hash_password(salt: &str, pw: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(salt.as_bytes());
-    h.update(pw.as_bytes());
-    hex::encode(h.finalize())
 }
 
 pub fn ct_eq(a: &str, b: &str) -> bool {
@@ -136,10 +138,6 @@ impl App {
             let _ = std::fs::write(dir.join("meta.json"), data);
         }
     }
-
-    pub fn paused(&self) -> bool {
-        self.engine.load().settings.pause_until.map_or(false, |t| t > now_ms())
-    }
 }
 
 /// Charge ou crée le fichier du nœud. Retourne aussi le mot de passe généré, le cas échéant.
@@ -167,17 +165,13 @@ pub fn load_node(cfg: &RunCfg) -> anyhow::Result<(NodeFile, Option<String>)> {
     if let Some(u) = &cfg.advertise_url {
         n.advertise_url = u.clone();
     }
-    if n.pw_salt.is_empty() {
-        n.pw_salt = random_hex(8);
-    }
-    if let Some(pw) = &cfg.password {
-        if !pw.is_empty() {
-            n.pw_hash = hash_password(&n.pw_salt, pw);
-        }
-    }
-    if n.pw_hash.is_empty() {
-        let pw = random_hex(6);
-        n.pw_hash = hash_password(&n.pw_salt, &pw);
+    if let Some(pw) = cfg.password.as_ref().filter(|p| !p.is_empty()) {
+        n.pw = Some(crate::auth::hash_pw(pw));
+        n.pw_hash.clear();
+        n.pw_salt.clear();
+    } else if n.pw.is_none() && n.pw_hash.is_empty() {
+        let pw = random_hex(8);
+        n.pw = Some(crate::auth::hash_pw(&pw));
         generated = Some(pw);
     }
     std::fs::write(&path, serde_json::to_vec_pretty(&n)?)?;

@@ -14,7 +14,6 @@ pub const T_SRV: u16 = 33;
 pub const T_OPT: u16 = 41;
 pub const T_CAA: u16 = 257;
 
-pub const RC_OK: u8 = 0;
 pub const RC_SERVFAIL: u8 = 2;
 pub const RC_NXDOMAIN: u8 = 3;
 pub const RC_REFUSED: u8 = 5;
@@ -259,7 +258,6 @@ pub fn set_id(buf: &mut [u8], id: u16) {
 #[derive(Debug, Default)]
 pub struct RespInfo {
     pub rcode: u8,
-    pub answer_count: usize,
     /// TTL minimal pour la mise en cache.
     pub ttl: Option<u32>,
     /// Adresses A / AAAA de la section réponse : (type, rdata, ttl).
@@ -282,7 +280,6 @@ pub fn response_info(buf: &[u8]) -> Option<RespInfo> {
     }
     let mut info = RespInfo {
         rcode: (flags & 0xF) as u8,
-        answer_count: an,
         truncated: flags & 0x0200 != 0,
         ..Default::default()
     };

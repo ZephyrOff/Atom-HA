@@ -1,26 +1,28 @@
 //! API HTTP (interface web, intégration Home Assistant, synchronisation entre nœuds).
 
+use crate::auth;
+use crate::clients::{ClientSet, Identity};
 use crate::dnswire::{self, Query};
 use crate::engine::RwAns;
 use crate::filter::{self, HitKind};
-use crate::model::{self, ListCfg, Settings, UpstreamCfg};
+use crate::model::{self, ClientCfg, ListCfg, Settings, UpstreamCfg};
 use crate::state::{self, App, Peer, VERSION};
 use crate::store::now_ms;
 use crate::sync::{self, PullReq};
 use crate::upstream;
 use axum::extract::{ConnectInfo, Path, Query as QS, Request, State};
-use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
-use base64::Engine as _;
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(RustEmbed)]
 #[folder = "ui/"]
@@ -46,6 +48,12 @@ fn not_found(msg: impl Into<String>) -> ApiErr {
 
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
+        .route("/api/auth/login", post(login))
+        .route("/api/auth/logout", post(logout))
+        .route("/api/auth/me", get(me))
+        .route("/api/auth/password", post(change_password))
+        .route("/api/auth/revoke-others", post(revoke_others))
+        .route("/api/auth/events", get(auth_events))
         .route("/api/info", get(info))
         .route("/api/c/{col}", get(list_col).post(create))
         .route("/api/c/{col}/{id}", put(update).delete(remove))
@@ -60,7 +68,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/log", get(log))
         .route("/api/log/facets", get(log_facets))
         .route("/api/stats", get(stats))
+        .route("/api/cache", get(cache_list))
+        .route("/api/cache/delete", post(cache_delete))
         .route("/api/cache/flush", post(cache_flush))
+        .route("/api/clients", get(clients_list))
         .route("/api/pause", post(pause))
         .route("/api/cluster", get(cluster))
         .route("/api/cluster/join", post(cluster_join))
@@ -70,26 +81,118 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/sync/hello", post(sync_hello))
         .route("/api/sync/notify", post(sync_notify))
         .fallback(static_files)
-        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
+        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         .with_state(app)
 }
 
 // ---------- authentification ----------
 
-fn unauthorized() -> Response {
+/// Fichiers et routes accessibles sans session.
+const PUBLIC: &[&str] = &["/login.html", "/login.js", "/theme.js", "/style.css", "/logo.png", "/api/auth/login", "/api/auth/me"];
+
+fn is_trusted_proxy(app: &App, peer: &SocketAddr) -> bool {
+    let p = peer.ip().to_string();
+    app.cfg.trusted_proxies.iter().any(|t| *t == p)
+}
+
+/// Adresse du client, en tenant compte d'un reverse proxy déclaré.
+fn client_ip(app: &App, peer: &SocketAddr, h: &HeaderMap) -> String {
+    if is_trusted_proxy(app, peer) {
+        if let Some(first) = h
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(str::trim)
+        {
+            if first.parse::<std::net::IpAddr>().is_ok() {
+                return first.to_string();
+            }
+        }
+    }
+    peer.ip().to_string()
+}
+
+fn session_token(h: &HeaderMap) -> Option<String> {
+    let c = h.get(header::COOKIE)?.to_str().ok()?;
+    c.split(';')
+        .filter_map(|kv| kv.trim().split_once('='))
+        .find(|(k, _)| *k == auth::COOKIE)
+        .map(|(_, v)| v.to_string())
+}
+
+fn cookie_value(token: &str, max_age: u64, secure: bool) -> String {
+    format!(
+        "{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
+        auth::COOKIE,
+        token,
+        max_age,
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+fn too_many(wait: Duration) -> Response {
+    let s = wait.as_secs() + 1;
     (
-        StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Basic realm=\"Atom\", charset=\"UTF-8\"")],
-        "Authentification requise",
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, s.to_string())],
+        Json(json!({"error": format!("Trop de tentatives. Réessaie dans {s} s."), "retry_after": s})),
     )
         .into_response()
 }
 
+/// Une requête qui modifie l'état doit venir de l'interface elle-même.
+fn csrf_ok(h: &HeaderMap) -> bool {
+    if let Some(origin) = h.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        let host = h.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
+        if origin.split_once("://").map_or(true, |(_, rest)| rest != host) {
+            return false;
+        }
+    }
+    h.get("x-atom").is_some()
+}
+
+fn add_security_headers(h: &mut HeaderMap, ingress: bool) {
+    h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    let mut csp = String::from(
+        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'",
+    );
+    if !ingress {
+        // Dans l'ingress, Home Assistant affiche l'interface dans un cadre.
+        csp.push_str("; frame-ancestors 'none'");
+        h.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    }
+    if let Ok(v) = HeaderValue::from_str(&csp) {
+        h.insert(header::CONTENT_SECURITY_POLICY, v);
+    }
+    if !h.contains_key(header::CACHE_CONTROL) {
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+}
+
 async fn auth(State(app): State<Arc<App>>, req: Request, next: Next) -> Response {
+    let peer = req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0);
+    let ingress = match (&app.cfg.trusted_ip, &peer) {
+        (Some(t), Some(p)) => *t == p.ip().to_string(),
+        _ => false,
+    };
+    let mut resp = gate(&app, req, next, peer, ingress).await;
+    add_security_headers(resp.headers_mut(), ingress);
+    resp
+}
+
+async fn gate(app: &Arc<App>, req: Request, next: Next, peer: Option<SocketAddr>, ingress: bool) -> Response {
     let path = req.uri().path().to_string();
     let headers = req.headers().clone();
+    let unsafe_method = !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS);
+    let ip = peer.map(|p| client_ip(app, &p, &headers)).unwrap_or_default();
+
+    // Synchronisation entre nœuds : jeton de cluster, avec la même protection.
     if path.starts_with("/api/sync/") {
+        if let Some(w) = app.auth.locked(&ip) {
+            return too_many(w);
+        }
         let token = headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
@@ -97,32 +200,161 @@ async fn auth(State(app): State<Arc<App>>, req: Request, next: Next) -> Response
             .unwrap_or("");
         let expected = app.node.lock().cluster_token.clone();
         if !state::ct_eq(token, &expected) {
+            app.auth.failure(&ip);
+            app.auth.event(&ip, "sync_fail", "jeton de cluster invalide");
             return (StatusCode::UNAUTHORIZED, Json(json!({"error": "jeton de cluster invalide"}))).into_response();
         }
         return next.run(req).await;
     }
-    if let (Some(trusted), Some(ci)) = (&app.cfg.trusted_ip, req.extensions().get::<ConnectInfo<SocketAddr>>()) {
-        if &ci.0.ip().to_string() == trusted {
-            return next.run(req).await;
+
+    if !ingress && unsafe_method && !csrf_ok(&headers) {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "requête refusée (origine)"}))).into_response();
+    }
+
+    let public = PUBLIC.contains(&path.as_str());
+    let session_ok = session_token(&headers).map_or(false, |t| app.auth.validate(&t));
+    if !(public || ingress || session_ok) {
+        return if path.starts_with("/api/") {
+            (StatusCode::UNAUTHORIZED, Json(json!({"error": "authentification requise"}))).into_response()
+        } else {
+            (StatusCode::FOUND, [(header::LOCATION, "login.html")]).into_response()
+        };
+    }
+    next.run(req).await
+}
+
+#[derive(Deserialize)]
+struct LoginReq {
+    username: String,
+    password: String,
+}
+
+async fn login(
+    State(app): State<Arc<App>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(r): Json<LoginReq>,
+) -> Response {
+    let ip = client_ip(&app, &peer, &headers);
+    if let Some(w) = app.auth.locked(&ip) {
+        return too_many(w);
+    }
+    let node = app.node.lock().clone();
+    let pw = r.password.clone();
+    let pw_ok = tokio::task::spawn_blocking(move || auth::verify_pw(&node, &pw)).await.unwrap_or(false);
+    if pw_ok && r.username == "admin" {
+        app.auth.success(&ip);
+        // Migration de l'ancien format de hash.
+        let migrate = app.node.lock().pw.is_none();
+        if migrate {
+            let pw = r.password.clone();
+            if let Ok(h) = tokio::task::spawn_blocking(move || auth::hash_pw(&pw)).await {
+                let mut n = app.node.lock();
+                n.pw = Some(h);
+                n.pw_hash.clear();
+                n.pw_salt.clear();
+                drop(n);
+                app.save_node();
+            }
         }
+        let token = app.auth.create_session(&ip);
+        app.auth.event(&ip, "login_ok", "");
+        let secure = is_trusted_proxy(&app, &peer)
+            && headers
+                .get("x-forwarded-proto")
+                .and_then(|v| v.to_str().ok())
+                .map_or(false, |v| v.eq_ignore_ascii_case("https"));
+        let cookie = cookie_value(&token, auth::SESSION_MAX_AGE_S, secure);
+        return ([(header::SET_COOKIE, cookie)], Json(json!({"ok": true}))).into_response();
     }
-    let ok = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Basic "))
-        .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b.trim()).ok())
-        .and_then(|b| String::from_utf8(b).ok())
-        .map(|s| {
-            let (user, pw) = s.split_once(':').unwrap_or((&s, ""));
-            let n = app.node.lock();
-            user == "admin" && state::ct_eq(&state::hash_password(&n.pw_salt, pw), &n.pw_hash)
-        })
-        .unwrap_or(false);
-    if ok {
-        next.run(req).await
-    } else {
-        unauthorized()
+    // Échec : ralentissement, comptage, éventuel blocage.
+    tokio::time::sleep(app.auth.tarpit()).await;
+    let lock = app.auth.failure(&ip);
+    app.auth.event(&ip, "login_fail", "");
+    tracing::warn!("échec de connexion depuis {ip}");
+    if let Some(d) = lock {
+        app.auth.event(&ip, "locked", &format!("bloquée {} s", d.as_secs()));
+        tracing::warn!("{ip} bloquée pendant {} s", d.as_secs());
+        return too_many(d);
     }
+    (StatusCode::UNAUTHORIZED, Json(json!({"error": "Identifiants incorrects"}))).into_response()
+}
+
+async fn logout(State(app): State<Arc<App>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Response {
+    if let Some(t) = session_token(&headers) {
+        app.auth.revoke(&t);
+        app.auth.event(&client_ip(&app, &peer, &headers), "logout", "");
+    }
+    ([(header::SET_COOKIE, cookie_value("", 0, false))], Json(json!({"ok": true}))).into_response()
+}
+
+async fn me(State(app): State<Arc<App>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Res {
+    let ingress = app.cfg.trusted_ip.as_deref() == Some(peer.ip().to_string().as_str());
+    let session = session_token(&headers).map_or(false, |t| app.auth.validate(&t));
+    Ok(Json(json!({
+        "authenticated": ingress || session,
+        "ingress": ingress,
+        "user": "admin",
+        "pw_locked": app.pw_locked,
+    })))
+}
+
+#[derive(Deserialize)]
+struct PwReq {
+    current: String,
+    new: String,
+}
+
+async fn change_password(
+    State(app): State<Arc<App>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(r): Json<PwReq>,
+) -> Result<Response, ApiErr> {
+    if app.pw_locked {
+        return Err(bad("le mot de passe est imposé par la configuration (ATOM_PASSWORD ou option de l'add-on)"));
+    }
+    let ip = client_ip(&app, &peer, &headers);
+    if let Some(w) = app.auth.locked(&ip) {
+        return Ok(too_many(w));
+    }
+    if r.new.chars().count() < 10 {
+        return Err(bad("le nouveau mot de passe doit contenir au moins 10 caractères"));
+    }
+    let node = app.node.lock().clone();
+    let cur = r.current.clone();
+    let ok = tokio::task::spawn_blocking(move || auth::verify_pw(&node, &cur)).await.unwrap_or(false);
+    if !ok {
+        app.auth.failure(&ip);
+        app.auth.event(&ip, "login_fail", "mot de passe actuel incorrect (changement de mot de passe)");
+        return Err(bad("mot de passe actuel incorrect"));
+    }
+    let new = r.new.clone();
+    let h = tokio::task::spawn_blocking(move || auth::hash_pw(&new)).await.map_err(|e| bad(e.to_string()))?;
+    {
+        let mut n = app.node.lock();
+        n.pw = Some(h);
+        n.pw_hash.clear();
+        n.pw_salt.clear();
+    }
+    app.save_node();
+    app.auth.revoke_others(session_token(&headers).as_deref());
+    app.auth.event(&ip, "password_changed", "");
+    Ok(Json(json!({"ok": true})).into_response())
+}
+
+async fn revoke_others(State(app): State<Arc<App>>, headers: HeaderMap) -> Res {
+    app.auth.revoke_others(session_token(&headers).as_deref());
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn auth_events(State(app): State<Arc<App>>, headers: HeaderMap) -> Res {
+    let cur = session_token(&headers);
+    Ok(Json(json!({
+        "events": app.auth.events(),
+        "locked": app.auth.locked_list().into_iter().map(|(ip, s)| json!({"ip": ip, "seconds": s})).collect::<Vec<_>>(),
+        "sessions": app.auth.sessions(cur.as_deref()),
+    })))
 }
 
 // ---------- statique ----------
@@ -199,6 +431,22 @@ async fn put_value(app: &Arc<App>, col: &str, id: &str, body: Value) -> Res {
         o.remove("updated_at");
     }
     let v = model::validate(col, body).map_err(bad)?;
+    if col == "rewrites" || col == "records" {
+        for (field, target) in [("clients", "clients"), ("groups", "groups")] {
+            for sid in v.get(field).and_then(|x| x.as_array()).into_iter().flatten().filter_map(|x| x.as_str()) {
+                if app.store.get(target, sid).is_none() {
+                    return Err(bad(format!("{} introuvable : {sid}", if field == "clients" { "client" } else { "groupe" })));
+                }
+            }
+        }
+    }
+    if col == "clients" {
+        if let Some(g) = v.get("group").and_then(|x| x.as_str()).filter(|g| !g.is_empty()) {
+            if app.store.get("groups", g).is_none() {
+                return Err(bad("groupe introuvable"));
+            }
+        }
+    }
     app.store.put(col, id, v.clone());
     if col == "lists" {
         let (a, id) = (app.clone(), id.to_string());
@@ -223,6 +471,9 @@ async fn remove(State(app): State<Arc<App>>, Path((col, id)): Path<(String, Stri
     if col == "settings" {
         return Err(bad("les réglages ne peuvent pas être supprimés"));
     }
+    if col == "clients" || col == "groups" {
+        strip_scope(&app, &col, &id);
+    }
     if col == "zones" {
         if let Some(z) = app.store.get("zones", &id) {
             let zname = z.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -235,6 +486,35 @@ async fn remove(State(app): State<Arc<App>>, Path((col, id)): Path<(String, Stri
     }
     app.store.delete(&col, &id);
     Ok(Json(json!({"ok": true})))
+}
+
+/// Retire un client ou un groupe supprimé des portées. Une configuration qui n'avait que lui
+/// pour portée est supprimée, plutôt que de devenir générale par erreur.
+fn strip_scope(app: &Arc<App>, kind: &str, id: &str) {
+    for col in ["rewrites", "records"] {
+        for (oid, mut v, _) in app.store.list(col) {
+            let Some(arr) = v.get_mut(kind).and_then(|x| x.as_array_mut()) else { continue };
+            let before = arr.len();
+            arr.retain(|x| x.as_str() != Some(id));
+            if arr.len() == before {
+                continue;
+            }
+            let empty = |f: &str| v.get(f).and_then(|x| x.as_array()).map_or(true, |a| a.is_empty());
+            if empty("clients") && empty("groups") {
+                app.store.delete(col, &oid);
+            } else {
+                app.store.put(col, &oid, v);
+            }
+        }
+    }
+    if kind == "groups" {
+        for (cid, mut v, _) in app.store.list("clients") {
+            if v.get("group").and_then(|x| x.as_str()) == Some(id) {
+                v["group"] = json!("");
+                app.store.put("clients", &cid, v);
+            }
+        }
+    }
 }
 
 // ---------- upstreams ----------
@@ -263,7 +543,7 @@ async fn upstream_status(State(app): State<Arc<App>>) -> Res {
 }
 
 async fn run_probe(app: &Arc<App>, id: &str, cfg: &UpstreamCfg) -> Res {
-    let u = upstream::Upstream::new(id, &cfg.name, &cfg.address, &cfg.bootstrap, cfg.order, cfg.domains.clone())
+    let u = upstream::Upstream::new(id, &cfg.name, &cfg.address, &cfg.bootstrap, cfg.domains.clone())
         .map_err(|e| bad(e.to_string()))?;
     let health = if id == "tmp" { Default::default() } else { app.health.clone() };
     match upstream::probe(&u, &health).await {
@@ -318,6 +598,7 @@ async fn lists_refresh_all(State(app): State<Arc<App>>) -> Res {
 #[derive(Deserialize)]
 struct CheckReq {
     domain: String,
+    client: Option<String>,
 }
 
 async fn check(State(app): State<Arc<App>>, Json(r): Json<CheckReq>) -> Res {
@@ -327,8 +608,9 @@ async fn check(State(app): State<Arc<App>>, Json(r): Json<CheckReq>) -> Res {
     }
     let eng = app.engine.load_full();
     let q = Query { id: 0, rd: true, name: name.clone(), qtype: dnswire::T_A, qclass: 1, qend: 0, edns_size: None };
+    let ident: Identity = r.client.as_deref().and_then(|c| c.trim().parse().ok()).map(|ip| eng.identify(ip)).unwrap_or_default();
     if eng.settings.rewrites_enabled {
-        if let Some(rw) = eng.rewrite_lookup(&name, now_ms()) {
+        if let Some(rw) = eng.rewrite_lookup(&name, now_ms(), &ident) {
             let a = rw
                 .iter()
                 .map(|e| match &e.ans {
@@ -340,7 +622,7 @@ async fn check(State(app): State<Arc<App>>, Json(r): Json<CheckReq>) -> Res {
             return Ok(Json(json!({"result": "rewritten", "detail": format!("réécriture DNS vers {a}")})));
         }
     }
-    if let Some(z) = eng.zone_answer(&q) {
+    if let Some(z) = eng.zone_answer(&q, &ident) {
         let nx = z.rcode == dnswire::RC_NXDOMAIN;
         return Ok(Json(json!({"result": "zone", "detail": if nx { "NXDOMAIN (zone locale)" } else { "répondu par une zone locale" }})));
     }
@@ -370,6 +652,13 @@ struct LogParams {
     before: Option<u64>,
     from: Option<u64>,
     to: Option<u64>,
+    ids: Option<String>,
+}
+
+fn ids_set(ids: &Option<String>) -> Option<ClientSet> {
+    ids.as_ref()
+        .filter(|s| !s.is_empty())
+        .map(|s| ClientSet::parse(&s.split(',').map(str::to_string).collect::<Vec<_>>()))
 }
 
 async fn log_facets(State(app): State<Arc<App>>) -> Res {
@@ -387,6 +676,7 @@ async fn log(State(app): State<Arc<App>>, QS(p): QS<LogParams>) -> Res {
         before: p.before,
         from: p.from,
         to: p.to,
+        ids: ids_set(&p.ids),
     };
     Ok(Json(serde_json::to_value(app.qlog.query(&f)).unwrap_or_default()))
 }
@@ -394,10 +684,12 @@ async fn log(State(app): State<Arc<App>>, QS(p): QS<LogParams>) -> Res {
 #[derive(Deserialize, Default)]
 struct StatsParams {
     node: Option<String>,
+    ids: Option<String>,
 }
 
 async fn stats(State(app): State<Arc<App>>, QS(p): QS<StatsParams>) -> Res {
-    let s = app.qlog.stats(&p.node.unwrap_or_default());
+    let set = ids_set(&p.ids);
+    let s = app.qlog.stats(&p.node.unwrap_or_default(), set.as_ref());
     let mut v = serde_json::to_value(&s).unwrap_or_default();
     // noms lisibles des nœuds
     let mut names: HashMap<String, String> = HashMap::new();
@@ -409,9 +701,152 @@ async fn stats(State(app): State<Arc<App>>, QS(p): QS<StatsParams>) -> Res {
     Ok(Json(v))
 }
 
+fn addr_string(t: u16, rd: &[u8]) -> Option<String> {
+    if t == dnswire::T_A && rd.len() == 4 {
+        Some(std::net::Ipv4Addr::new(rd[0], rd[1], rd[2], rd[3]).to_string())
+    } else if t == dnswire::T_AAAA && rd.len() == 16 {
+        let mut b = [0u8; 16];
+        b.copy_from_slice(rd);
+        Some(std::net::Ipv6Addr::from(b).to_string())
+    } else {
+        None
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct CacheParams {
+    search: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn cache_list(State(app): State<Arc<App>>, QS(p): QS<CacheParams>) -> Res {
+    let now = std::time::Instant::now();
+    let search = p.search.unwrap_or_default().to_lowercase();
+    let limit = p.limit.unwrap_or(500).clamp(1, 5000);
+    let c = app.cache.lock();
+    let live: Vec<_> = c.iter().filter(|(_, e)| e.expires > now).collect();
+    let total = live.len();
+    let mut v: Vec<Value> = live
+        .into_iter()
+        .filter(|(k, _)| search.is_empty() || k.0.contains(&search))
+        .map(|(k, e)| {
+            let info = dnswire::response_info(&e.data).unwrap_or_default();
+            let answers: Vec<String> = info.addrs.iter().filter_map(|(t, rd, _)| addr_string(*t, rd)).collect();
+            json!({"name": k.0, "type": dnswire::type_name(k.1), "ttl": (e.expires - now).as_secs(), "size": e.data.len(), "rcode": info.rcode, "answers": answers})
+        })
+        .collect();
+    drop(c);
+    v.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()).then(a["type"].as_str().cmp(&b["type"].as_str())));
+    v.truncate(limit);
+    Ok(Json(json!({
+        "entries": v,
+        "total": total,
+        "hits": app.cache_hits.load(std::sync::atomic::Ordering::Relaxed),
+        "misses": app.cache_misses.load(std::sync::atomic::Ordering::Relaxed),
+        "capacity": app.engine.load().settings.cache_size,
+        "enabled": app.engine.load().settings.cache_enabled,
+    })))
+}
+
+#[derive(Deserialize)]
+struct CacheKey {
+    name: String,
+    #[serde(rename = "type")]
+    qtype: String,
+}
+
+#[derive(Deserialize)]
+struct CacheDelete {
+    entries: Vec<CacheKey>,
+}
+
+async fn cache_delete(State(app): State<Arc<App>>, Json(r): Json<CacheDelete>) -> Res {
+    let set: std::collections::HashSet<(String, String)> =
+        r.entries.into_iter().map(|k| (k.name.to_lowercase(), k.qtype.to_uppercase())).collect();
+    let mut c = app.cache.lock();
+    let before = c.len();
+    c.retain(|k, _| !set.contains(&(k.0.clone(), dnswire::type_name(k.1))));
+    Ok(Json(json!({"deleted": before - c.len()})))
+}
+
 async fn cache_flush(State(app): State<Arc<App>>) -> Res {
-    app.cache.lock().clear();
-    Ok(Json(json!({"ok": true})))
+    let mut c = app.cache.lock();
+    let n = c.len();
+    c.clear();
+    Ok(Json(json!({"ok": true, "deleted": n})))
+}
+
+// ---------- clients ----------
+
+async fn clients_list(State(app): State<Arc<App>>) -> Res {
+    let seen = app.qlog.clients_summary();
+    let groups = app.store.list("groups");
+    let cfgs: Vec<(String, ClientCfg)> = app
+        .store
+        .list("clients")
+        .into_iter()
+        .filter_map(|(id, v, _)| serde_json::from_value::<ClientCfg>(v).ok().map(|c| (id, c)))
+        .collect();
+    let sets: Vec<(String, ClientSet)> = cfgs.iter().map(|(id, c)| (id.clone(), ClientSet::parse(&c.ids))).collect();
+
+    #[derive(Default)]
+    struct Agg {
+        queries: u64,
+        blocked: u64,
+        last: u64,
+        ips: Vec<String>,
+    }
+    let mut agg: HashMap<String, Agg> = HashMap::new();
+    let mut loose: Vec<(String, Agg)> = Vec::new();
+    for (ip, n, b, last) in seen {
+        let owner = ip
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .and_then(|addr| sets.iter().filter_map(|(id, s)| s.specificity(addr).map(|sp| (sp, id))).max_by_key(|(sp, _)| *sp))
+            .map(|(_, id)| id.clone());
+        match owner {
+            Some(id) => {
+                let a = agg.entry(id).or_default();
+                a.queries += n;
+                a.blocked += b;
+                a.last = a.last.max(last);
+                a.ips.push(ip);
+            }
+            None => loose.push((ip.clone(), Agg { queries: n, blocked: b, last, ips: vec![ip] })),
+        }
+    }
+    let mut clients: Vec<Value> = Vec::new();
+    for (id, c) in &cfgs {
+        let a = agg.remove(id).unwrap_or_default();
+        clients.push(json!({
+            "id": id, "key": id, "name": c.name, "ids": c.ids, "group": c.group, "notes": c.notes,
+            "block_internet": c.block_internet, "block_lan": c.block_lan, "block_until": c.block_until,
+            "queries": a.queries, "blocked": a.blocked, "last_seen": a.last, "ips": a.ips,
+        }));
+    }
+    for (ip, a) in loose {
+        clients.push(json!({
+            "id": null, "key": ip, "name": "", "ids": [ip.clone()], "group": "", "notes": "",
+            "block_internet": false, "block_lan": false, "block_until": null,
+            "queries": a.queries, "blocked": a.blocked, "last_seen": a.last, "ips": a.ips,
+        }));
+    }
+    clients.sort_by(|a, b| b["last_seen"].as_u64().cmp(&a["last_seen"].as_u64()));
+    let group_rows: Vec<Value> = groups
+        .into_iter()
+        .map(|(id, v, _)| {
+            let members: Vec<&Value> = clients.iter().filter(|c| c["group"].as_str() == Some(id.as_str())).collect();
+            let q: u64 = members.iter().filter_map(|c| c["queries"].as_u64()).sum();
+            let b: u64 = members.iter().filter_map(|c| c["blocked"].as_u64()).sum();
+            let mut g = v;
+            g["id"] = json!(id);
+            g["members"] = json!(members.len());
+            g["queries"] = json!(q);
+            g["blocked"] = json!(b);
+            g
+        })
+        .collect();
+    Ok(Json(json!({"clients": clients, "groups": group_rows})))
 }
 
 #[derive(Deserialize)]

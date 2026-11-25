@@ -24,8 +24,6 @@ pub enum Proto {
 pub struct Upstream {
     pub id: String,
     pub name: String,
-    pub address: String,
-    pub order: f64,
     pub domains: Vec<String>,
     pub proto: Proto,
     https: Option<reqwest::Client>,
@@ -116,7 +114,7 @@ fn rand_u16() -> u16 {
 }
 
 impl Upstream {
-    pub fn new(id: &str, name: &str, address: &str, bootstrap: &str, order: f64, domains: Vec<String>) -> Result<Self> {
+    pub fn new(id: &str, name: &str, address: &str, bootstrap: &str, domains: Vec<String>) -> Result<Self> {
         let proto = parse_address(address, bootstrap)?;
         let https = if let Proto::Https { host, port, bootstrap, .. } = &proto {
             let mut b = reqwest::Client::builder().timeout(Duration::from_secs(10)).pool_idle_timeout(Duration::from_secs(60));
@@ -127,7 +125,7 @@ impl Upstream {
         } else {
             None
         };
-        Ok(Self { id: id.into(), name: name.into(), address: address.into(), order, domains, proto, https })
+        Ok(Self { id: id.into(), name: name.into(), domains, proto, https })
     }
 
     /// Envoie la requête et retourne la réponse brute (l'ID de la réponse est celui de `req`).

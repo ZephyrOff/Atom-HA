@@ -11,9 +11,10 @@ let routeToken = 0;
 async function api(method, path, body) {
   const r = await fetch('api/' + path, {
     method,
-    headers: body !== undefined ? { 'content-type': 'application/json' } : {},
+    headers: body !== undefined ? { 'content-type': 'application/json', 'x-atom': '1' } : { 'x-atom': '1' },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  if (r.status === 401) { location.href = 'login.html'; throw new Error('Session expirée'); }
   let j = null;
   try { j = await r.json(); } catch { /* corps vide */ }
   if (!r.ok) throw new Error((j && j.error) || r.statusText);
@@ -79,7 +80,7 @@ pages.dashboard = async function (token) {
       : `<span class="muted">Pause :</span>${[5, 30, 60].map(m => `<button class="btn sm" data-pause="${m}">${m} min</button>`).join('')}
          <span class="row" style="margin-left:8px">Filtrage ${sw(set.filtering_enabled, 'data-a="filtering"')}</span>`;
     const max = Math.max(10, ...st.hours.map(h => h[0]));
-    const nice = (() => { const p = Math.pow(10, Math.floor(Math.log10(max))); return Math.ceil(max / p) * p; })();
+    const nice = (() => { const p = Math.pow(10, Math.floor(Math.log10(max))); const n = Math.ceil(max / p) * p; return n % 4 ? Math.ceil(n / 4) * 4 : n; })();
     const W = 720, H = 190, L = 40, B = 22, T = 8, ch = H - B - T, cw = W - L - 4, bw = cw / 24;
     let svg = '';
     for (let i = 0; i <= 4; i++) {
@@ -413,38 +414,6 @@ pages.dns = async function (token) {
   every(async () => { if (dragId) return; health = await get('upstreams/status'); draw(); }, 4000);
 };
 
-pages.rewrites = async function (token) {
-  main.innerHTML = `<div class="head"><div><h1>Réécritures DNS</h1><p>Un domaine répond avec l'adresse (ou le nom) de ton choix. Les jokers sont acceptés : <span class="mono">*.apps.maison.lan</span>.</p></div>
-    <label class="row"><span class="muted">Toutes les réécritures</span>${sw(true, 'id="rwall"')}</label></div>
-    <div class="card"><div class="tblwrap"><table><thead><tr><th>Actif</th><th>Domaine</th><th>Réponse</th><th>Expire</th><th></th></tr></thead><tbody id="rt"></tbody></table></div></div>
-    <div class="card"><h2>Ajouter une réécriture</h2><div class="row">
-      <input class="f grow" id="rd" placeholder="nas.maison.lan" aria-label="Domaine"><input class="f grow" id="ra" placeholder="192.168.1.20 ou autre.domaine.lan" aria-label="Réponse">
-      <select class="f" id="rx" style="width:auto" aria-label="Expiration"><option value="0">Sans expiration</option><option value="60">Pendant 1 h</option><option value="120">Pendant 2 h</option><option value="1440">Pendant 24 h</option></select>
-      <button class="btn pri" id="radd">Ajouter</button></div></div>`;
-  async function draw() {
-    const [rws, set] = await Promise.all([get('c/rewrites'), getSettings()]);
-    if (token !== routeToken) return;
-    $('#rwall').checked = set.rewrites_enabled;
-    $('#rt').innerHTML = rws.length ? rws.map(r => `<tr><td>${sw(r.enabled, `data-tog="${r.id}"`)}</td><td class="mono">${esc(r.domain)}</td><td class="mono">${esc(r.answer)}</td>
-      <td>${r.expires_at ? (r.expires_at < Date.now() ? '<span class="tag warn">expirée</span>' : 'à ' + clock(r.expires_at)) : 'jamais'}</td>
-      <td><button class="btn sm danger" data-del="${r.id}">Supprimer</button></td></tr>`).join('') : '<tr><td colspan="5" class="empty">Aucune réécriture</td></tr>';
-  }
-  $('#radd').onclick = guard(async () => {
-    const m = +$('#rx').value;
-    await api('POST', 'c/rewrites', { domain: $('#rd').value, answer: $('#ra').value, enabled: true, expires_at: m ? Date.now() + m * 60000 : null });
-    $('#rd').value = ''; $('#ra').value = ''; toast('Réécriture ajoutée'); draw();
-  });
-  main.onclick = guard(async e => { const t = e.target.closest('[data-del]'); if (t) { await api('DELETE', `c/rewrites/${t.dataset.del}`); draw(); } });
-  main.onchange = guard(async e => {
-    if (e.target.id === 'rwall') { await saveSettings({ rewrites_enabled: e.target.checked }); toast(e.target.checked ? 'Réécritures activées' : 'Réécritures désactivées'); return; }
-    const id = e.target.dataset.tog; if (!id) return;
-    const r = (await get('c/rewrites')).find(x => x.id === id); delete r.id; delete r.updated_at; r.enabled = e.target.checked;
-    await api('PUT', `c/rewrites/${id}`, r); draw();
-  });
-  await draw();
-  every(draw, 6000);
-};
-
 pages.rules = async function (token) {
   main.innerHTML = `<div class="head"><div><h1>Règles personnalisées</h1><p>Syntaxe AdGuard. Ces règles passent avant toutes les listes.</p></div></div>
     <div class="cols"><div class="card"><h2>Éditeur</h2><textarea class="f" id="rtxt" spellcheck="false" aria-label="Règles"></textarea>
@@ -471,8 +440,8 @@ pages.records = async function (token) {
   main.innerHTML = `<div class="head"><div><h1>Enregistrements DNS</h1><p>Atom répond avec autorité pour les zones ci-dessous. Un nom absent d'une zone locale reçoit NXDOMAIN, sans interroger les upstreams.</p></div></div>
     <div class="card"><h2>Zones</h2><div class="row"><div class="seg" id="zs"></div><input class="f" id="zn" style="width:200px" placeholder="maison.lan" aria-label="Nouvelle zone"><button class="btn" id="zadd">Créer la zone</button></div></div>
     <div id="zbody"></div>`;
-  let zones = [], recs = [], zone = null, editing = null, q = '';
-  async function load() { [zones, recs] = await Promise.all([get('c/zones'), get('c/records')]); if (!zone || !zones.find(z => z.name === zone)) zone = zones[0] ? zones[0].name : null; }
+  let zones = [], recs = [], zone = null, editing = null, q = '', scopeCtl = null;
+  async function load() { [zones, recs] = await Promise.all([get('c/zones'), get('c/records'), loadDir()]); if (!zone || !zones.find(z => z.name === zone)) zone = zones[0] ? zones[0].name : null; }
   const TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'SRV', 'PTR', 'NS', 'CAA'];
   const HINT = { A: '192.168.1.20', AAAA: 'fd00::20', CNAME: 'cible.maison.lan', MX: '10 mail.maison.lan', TXT: 'texte libre', SRV: '0 5 1883 hote.maison.lan', PTR: 'nas.maison.lan', NS: 'ns.maison.lan', CAA: '0 issue "letsencrypt.org"' };
   function renderRows() {
@@ -481,9 +450,9 @@ pages.records = async function (token) {
     const term = q.trim().toLowerCase();
     const rs = term ? all.filter(r => [r.name || '@', r.name ? `${r.name}.${zone}` : zone, r.type, r.value].join(' ').toLowerCase().includes(term)) : all;
     $('#rcount').textContent = term ? `${rs.length} sur ${all.length}` : `${all.length} enregistrement(s)`;
-    $('#rtb').innerHTML = rs.length ? rs.map(r => `<tr><td>${sw(r.enabled, `data-tog="${r.id}"`)}</td><td><span class="tag acc">${r.type}</span></td><td class="mono">${esc(r.name || '@')}</td><td class="mono wrap">${esc(r.value)}</td><td>${r.ttl} s</td><td>${r.type === 'A' ? sw(r.ptr, `data-ptr="${r.id}"`) : ''}</td>
+    $('#rtb').innerHTML = rs.length ? rs.map(r => `<tr><td>${sw(r.enabled, `data-tog="${r.id}"`)}</td><td><span class="tag acc">${r.type}</span></td><td class="mono">${esc(r.name || '@')}</td><td class="mono wrap">${esc(r.value)}</td><td>${r.ttl} s</td><td>${r.type === 'A' ? sw(r.ptr, `data-ptr="${r.id}"`) : ''}</td><td>${scopeTags(r)}</td>
       <td class="row" style="flex-wrap:nowrap"><button class="btn sm" data-edit="${r.id}">Modifier</button><button class="btn sm danger" data-del="${r.id}">Supprimer</button></td></tr>`).join('')
-      : `<tr><td colspan="7" class="empty">${all.length ? 'Aucun enregistrement ne correspond à la recherche' : 'Aucun enregistrement'}</td></tr>`;
+      : `<tr><td colspan="8" class="empty">${all.length ? 'Aucun enregistrement ne correspond à la recherche' : 'Aucun enregistrement'}</td></tr>`;
   }
   function draw() {
     if (token !== routeToken) return;
@@ -491,17 +460,19 @@ pages.records = async function (token) {
     if (!zone) { $('#zbody').innerHTML = '<div class="card empty">Crée une première zone, par exemple <span class="mono">maison.lan</span>.</div>'; return; }
     $('#zbody').innerHTML = `<div class="card" style="margin-top:14px"><h2>${esc(zone)} <button class="btn sm danger" data-zdel="1">Supprimer la zone</button></h2>
       <div class="row" style="margin-bottom:12px"><input class="f grow" id="rq" type="search" placeholder="Rechercher par nom, type ou valeur" value="${esc(q)}" aria-label="Rechercher un enregistrement"><span class="muted" id="rcount"></span></div>
-      <div class="tblwrap"><table><thead><tr><th>Actif</th><th>Type</th><th>Nom</th><th>Valeur</th><th>TTL</th><th>PTR</th><th></th></tr></thead><tbody id="rtb"></tbody></table></div></div>
+      <div class="tblwrap"><table><thead><tr><th>Actif</th><th>Type</th><th>Nom</th><th>Valeur</th><th>TTL</th><th>PTR</th><th>Portée</th><th></th></tr></thead><tbody id="rtb"></tbody></table></div></div>
       <div class="card" style="margin-top:14px"><h2 id="rh">Ajouter un enregistrement</h2><div class="row">
         <select class="f" id="rtype" style="width:auto" aria-label="Type">${TYPES.map(t => `<option>${t}</option>`).join('')}</select>
         <input class="f grow" id="rname" placeholder="nom (nas, *.apps, @)" aria-label="Nom"><input class="f grow" id="rval" placeholder="valeur (${HINT.A})" aria-label="Valeur">
         <input class="f" id="rttl" style="width:90px" value="300" aria-label="TTL en secondes"><label class="row" id="rptrl"><span class="muted">PTR</span>${sw(false, 'id="rptr"')}</label>
         <button class="btn pri" id="rsave">Ajouter</button><button class="btn" id="rcancel" hidden>Annuler</button></div>
+        <div class="row" style="margin-top:12px;align-items:flex-start"><span class="muted" style="padding-top:8px">Portée</span><div id="rscope" class="grow"></div></div>
         <p class="note" style="margin-top:12px">Le numéro de série SOA évolue tout seul. Avec l'option PTR, un enregistrement A génère aussi la résolution inverse de son adresse.</p></div>`;
     renderRows();
+    scopeCtl = mountScope($('#rscope'), editing ? recs.find(x => x.id === editing) : {});
     $('#rtype').onchange = () => { $('#rval').placeholder = `valeur (${HINT[$('#rtype').value]})`; $('#rptrl').hidden = $('#rtype').value !== 'A'; };
   }
-  function reset() { editing = null; if ($('#rname')) { $('#rname').value = ''; $('#rval').value = ''; $('#rttl').value = 300; $('#rsave').textContent = 'Ajouter'; $('#rh').textContent = 'Ajouter un enregistrement'; $('#rcancel').hidden = true; } }
+  function reset() { editing = null; if (scopeCtl) scopeCtl.set({}); if ($('#rname')) { $('#rname').value = ''; $('#rval').value = ''; $('#rttl').value = 300; $('#rsave').textContent = 'Ajouter'; $('#rh').textContent = 'Ajouter un enregistrement'; $('#rcancel').hidden = true; } }
   main.onclick = guard(async e => {
     const t = e.target.closest('button'); if (!t) return;
     if (t.id === 'zadd') { const n = $('#zn').value; await api('POST', 'c/zones', { name: n }); zone = n.trim().toLowerCase().replace(/\.$/, ''); $('#zn').value = ''; toast('Zone créée'); await load(); draw(); }
@@ -511,7 +482,7 @@ pages.records = async function (token) {
       const z = zones.find(x => x.name === zone); await api('DELETE', `c/zones/${z.id}`); await load(); draw();
     }
     else if (t.id === 'rsave') {
-      const body = { zone, type: $('#rtype').value, name: $('#rname').value, value: $('#rval').value, ttl: +$('#rttl').value || 300, ptr: $('#rptr').checked, enabled: true };
+      const body = { zone, type: $('#rtype').value, name: $('#rname').value, value: $('#rval').value, ttl: +$('#rttl').value || 300, ptr: $('#rptr').checked, enabled: true, ...scopeCtl.get() };
       if (editing) { const old = recs.find(r => r.id === editing); body.enabled = old.enabled; await api('PUT', `c/records/${editing}`, body); }
       else await api('POST', 'c/records', body);
       toast('Enregistrement enregistré'); const keep = zone; await load(); zone = keep; draw();
@@ -520,7 +491,7 @@ pages.records = async function (token) {
     else if (t.dataset.del) { await api('DELETE', `c/records/${t.dataset.del}`); await load(); draw(); }
     else if (t.dataset.edit) {
       const r = recs.find(x => x.id === t.dataset.edit); editing = r.id;
-      $('#rtype').value = r.type; $('#rname').value = r.name; $('#rval').value = r.value; $('#rttl').value = r.ttl; $('#rptr').checked = r.ptr; $('#rptrl').hidden = r.type !== 'A';
+      $('#rtype').value = r.type; $('#rname').value = r.name; $('#rval').value = r.value; $('#rttl').value = r.ttl; $('#rptr').checked = r.ptr; $('#rptrl').hidden = r.type !== 'A'; scopeCtl.set(r);
       $('#rsave').textContent = 'Enregistrer'; $('#rh').textContent = 'Modifier un enregistrement'; $('#rcancel').hidden = false; $('#rname').focus();
     }
   });
@@ -575,7 +546,54 @@ pages.cluster = async function (token) {
   every(draw, 3000);
 };
 
+pages.security = async function (token) {
+  const [me, ev] = await Promise.all([get('auth/me'), get('auth/events')]);
+  if (token !== routeToken) return;
+  const KIND = {
+    login_ok: ['Connexion réussie', 'ok'], login_fail: ['Échec de connexion', 'bad'], locked: ['Adresse bloquée', 'warn'],
+    sync_fail: ['Échec côté cluster', 'warn'], password_changed: ['Mot de passe modifié', 'acc'], logout: ['Déconnexion', ''],
+  };
+  const when = ms => new Date(ms).toLocaleString('fr-FR');
+  main.innerHTML = `<div class="head"><div><h1>Sécurité</h1><p>Compte administrateur, sessions ouvertes et tentatives de connexion récentes.</p></div></div>
+    <div class="cols">
+      <div class="card"><h2>Mot de passe</h2>
+        ${me.pw_locked ? '<p class="note">Le mot de passe est imposé par la configuration (variable <span class="mono">ATOM_PASSWORD</span> ou option de l\'add-on). Modifie-le à cet endroit.</p>'
+          : me.ingress ? '<p class="note">Tu es connecté par Home Assistant. Le mot de passe sert à l\'accès direct sur le port de l\'interface.</p>' : ''}
+        ${me.pw_locked ? '' : `<div class="stack">
+          <label class="lbl">Mot de passe actuel<input class="f" id="pc" type="password" autocomplete="current-password"></label>
+          <label class="lbl">Nouveau mot de passe (10 caractères minimum)<input class="f" id="pn" type="password" autocomplete="new-password"></label>
+          <label class="lbl">Confirmer<input class="f" id="pn2" type="password" autocomplete="new-password"></label>
+          <div class="row"><button class="btn pri" id="pw">Changer le mot de passe</button></div></div>
+          <p class="note" style="margin-top:12px">Les autres sessions sont fermées après le changement.</p>`}
+      </div>
+      <div class="card"><h2>Sessions ouvertes <button class="btn sm" id="rev" ${ev.sessions.filter(s => !s.current).length ? '' : 'disabled'}>Déconnecter les autres</button></h2>
+        <div class="tblwrap"><table><thead><tr><th>Adresse</th><th>Ouverte</th><th>Dernière activité</th><th></th></tr></thead><tbody>
+        ${ev.sessions.length ? ev.sessions.map(s => `<tr><td class="mono">${esc(s.ip)}</td><td>${when(s.created)}</td><td>${ago(s.last_seen)}</td><td>${s.current ? '<span class="tag acc">cette session</span>' : ''}</td></tr>`).join('') : `<tr><td colspan="4" class="empty">${me.ingress ? 'Accès via Home Assistant, sans session propre' : 'Aucune session'}</td></tr>`}
+        </tbody></table></div>
+        ${ev.locked.length ? `<h2 style="margin-top:16px">Adresses bloquées</h2><div class="tblwrap"><table><tbody>${ev.locked.map(l => `<tr><td class="mono">${esc(l.ip)}</td><td>encore ${l.seconds} s</td></tr>`).join('')}</tbody></table></div>` : ''}
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px"><h2>Tentatives récentes</h2>
+      <div class="tblwrap"><table><thead><tr><th>Date</th><th>Adresse</th><th>Événement</th><th>Détail</th></tr></thead><tbody>
+      ${ev.events.length ? ev.events.map(e => { const [t, c] = KIND[e.kind] || [e.kind, '']; return `<tr><td>${when(e.ts)}</td><td class="mono">${esc(e.ip)}</td><td><span class="tag ${c}">${t}</span></td><td class="muted wrap">${esc(e.detail)}</td></tr>`; }).join('') : '<tr><td colspan="4" class="empty">Aucun événement depuis le démarrage</td></tr>'}
+      </tbody></table></div>
+      <p class="note" style="margin-top:12px">Après 4 échecs, l'adresse est bloquée 1 minute, puis la durée double à chaque nouvel échec (jusqu'à 1 heure). Les échecs sur la synchronisation du cluster comptent aussi.</p></div>`;
+  const pw = $('#pw');
+  if (pw) pw.onclick = guard(async () => {
+    if ($('#pn').value !== $('#pn2').value) throw new Error('La confirmation ne correspond pas');
+    await api('POST', 'auth/password', { current: $('#pc').value, new: $('#pn').value });
+    toast('Mot de passe modifié');
+    ['pc', 'pn', 'pn2'].forEach(i => ($('#' + i).value = ''));
+  });
+  $('#rev').onclick = guard(async () => { await api('POST', 'auth/revoke-others'); toast('Autres sessions fermées'); pages.security(token); });
+};
+
 // ---------- routeur ----------
+
+async function logout() {
+  try { await api('POST', 'auth/logout'); } catch { /* déjà déconnecté */ }
+  location.href = 'login.html';
+}
 
 async function nodeChip() {
   try {
@@ -588,13 +606,30 @@ async function nodeChip() {
 async function route() {
   timers.forEach(clearInterval); timers = [];
   main.onclick = main.onchange = main.oninput = main.ondragstart = main.ondragover = main.ondragend = main.ondrop = null;
-  const name = (location.hash || '#dashboard').slice(1);
+  const full = (location.hash || '#dashboard').slice(1);
+  const [name, ...rest] = full.split('/');
+  let param = rest.join('/');
+  try { param = decodeURIComponent(param); } catch { /* garde la valeur brute */ }
   const r = pages[name] ? name : 'dashboard';
-  $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.r === r));
+  const navKey = r === 'client' || r === 'group' ? 'clients' : r;
+  $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.r === navKey));
   const token = ++routeToken;
-  try { await pages[r](token); } catch (e) { if (token === routeToken) main.innerHTML = `<div class="card"><h2>Erreur</h2><p>${esc(e.message)}</p></div>`; }
+  try { await pages[r](token, param); } catch (e) { if (token === routeToken) main.innerHTML = `<div class="card"><h2>Erreur</h2><p>${esc(e.message)}</p></div>`; }
   nodeChip();
 }
 window.addEventListener('hashchange', route);
+const effectiveTheme = () => document.documentElement.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+function themeLabel() { $('#theme').textContent = effectiveTheme() === 'dark' ? '☀ Mode clair' : '☾ Mode sombre'; }
+$('#theme').onclick = () => {
+  const next = effectiveTheme() === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  try { localStorage.setItem('atom-theme', next); } catch { /* stockage indisponible */ }
+  themeLabel();
+};
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', themeLabel);
+themeLabel();
+$('#logout').onclick = logout;
+get('auth/me').then(m => { if (m.ingress) $('#logout').hidden = true; }).catch(() => {});
 setInterval(nodeChip, 10000);
-route();
+// Les pages de clients.js sont chargées après ce fichier : on démarre quand tout est prêt.
+window.addEventListener('load', route);

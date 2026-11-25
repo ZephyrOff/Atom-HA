@@ -1,6 +1,7 @@
 //! Journal des requêtes, répliqué entre les nœuds.
 //! Chaque entrée appartient à un nœud d'origine et porte un numéro de séquence croissant.
 
+use crate::clients::ClientSet;
 use crate::store::now_ms;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -50,6 +51,8 @@ pub struct LogFilter {
     pub before: Option<u64>,
     pub from: Option<u64>,
     pub to: Option<u64>,
+    /// Restreint aux clients (adresses ou plages) d'un client ou d'un groupe.
+    pub ids: Option<ClientSet>,
 }
 
 #[derive(Serialize, Default)]
@@ -170,6 +173,11 @@ impl QLog {
                         continue;
                     }
                 }
+                if let Some(m) = &f.ids {
+                    if !m.contains_str(&e.client) {
+                        continue;
+                    }
+                }
                 if !client.is_empty() && !e.client.to_lowercase().contains(&client) {
                     continue;
                 }
@@ -194,6 +202,27 @@ impl QLog {
         all
     }
 
+    /// Activité par adresse sur les dernières 24 h : (adresse, requêtes, bloquées, dernière requête).
+    pub fn clients_summary(&self) -> Vec<(String, u64, u64, u64)> {
+        let g = self.inner.lock();
+        let cutoff = now_ms().saturating_sub(24 * 3600 * 1000);
+        let mut map: HashMap<String, (u64, u64, u64)> = HashMap::new();
+        for m in g.per.values() {
+            for e in m.values().rev() {
+                if e.ts < cutoff {
+                    break;
+                }
+                let r = map.entry(e.client.clone()).or_default();
+                r.0 += 1;
+                if e.result == "blocked" {
+                    r.1 += 1;
+                }
+                r.2 = r.2.max(e.ts);
+            }
+        }
+        map.into_iter().map(|(k, v)| (k, v.0, v.1, v.2)).collect()
+    }
+
     pub fn facets(&self) -> Facets {
         let g = self.inner.lock();
         let mut clients: std::collections::BTreeSet<String> = Default::default();
@@ -209,7 +238,7 @@ impl QLog {
         Facets { clients: clients.into_iter().collect(), qtypes: qtypes.into_iter().collect() }
     }
 
-    pub fn stats(&self, node_filter: &str) -> Stats {
+    pub fn stats(&self, node_filter: &str, ids: Option<&ClientSet>) -> Stats {
         let g = self.inner.lock();
         let now = now_ms();
         let cutoff = now.saturating_sub(24 * 3600 * 1000);
@@ -226,6 +255,11 @@ impl QLog {
             for e in m.values().rev() {
                 if e.ts < cutoff {
                     break;
+                }
+                if let Some(set) = ids {
+                    if !set.contains_str(&e.client) {
+                        continue;
+                    }
                 }
                 s.total += 1;
                 *s.per_node.entry(origin.clone()).or_default() += 1;
@@ -256,14 +290,6 @@ impl QLog {
         s.top_blocked = top(blk);
         s.top_clients = top(cli);
         s
-    }
-
-    pub fn clear(&self) {
-        let mut g = self.inner.lock();
-        for m in g.per.values_mut() {
-            m.clear();
-        }
-        g.dirty = true;
     }
 
     pub fn save_if_dirty(&self) {
