@@ -42,6 +42,7 @@ pub struct Peer {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
 pub struct NodeFile {
     pub node_id: String,
     pub name: String,
