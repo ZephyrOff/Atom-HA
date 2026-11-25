@@ -24,6 +24,9 @@ pub struct LogEntry {
     pub cached: bool,
     pub ms: u32,
     pub rcode: u8,
+    /// Réponse authentifiée par DNSSEC (bit AD de l'upstream).
+    #[serde(default)]
+    pub ad: bool,
 }
 
 #[derive(Default)]

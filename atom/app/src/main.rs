@@ -1,4 +1,6 @@
 mod api;
+mod api_extra;
+mod api_tls;
 mod auth;
 mod clients;
 mod dnsserver;
@@ -9,9 +11,11 @@ mod lists;
 mod model;
 mod qlog;
 mod resolver;
+mod snapshots;
 mod state;
 mod store;
 mod sync;
+mod tls;
 mod upstream;
 
 use arc_swap::ArcSwap;
@@ -90,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|d| serde_json::from_slice(&d).ok())
         .unwrap_or_default();
 
+    let http_client = reqwest::Client::builder().user_agent(format!("atom/{}", state::VERSION)).build()?;
     let app = Arc::new(App {
         cfg: cfg.clone(),
         node: Mutex::new(node),
@@ -104,9 +109,16 @@ async fn main() -> anyhow::Result<()> {
         sync_wake: Notify::new(),
         peer_status: Mutex::new(HashMap::new()),
         started: Instant::now(),
-        http: reqwest::Client::builder().user_agent(format!("atom/{}", state::VERSION)).build()?,
+        http: http_client.clone(),
         dns_ok: std::sync::atomic::AtomicBool::new(false),
         auth: auth::Auth::default(),
+        dns_error: Mutex::new(String::new()),
+        token_used: Mutex::new(HashMap::new()),
+        tls_reload: Notify::new(),
+        tls_cfg: arc_swap::ArcSwapOption::empty(),
+        tls_error: Mutex::new(String::new()),
+        tls_listening: Mutex::new(None),
+        sync_client: ArcSwap::from_pointee(http_client.clone()),
         cache_hits: Default::default(),
         cache_misses: Default::default(),
         pw_locked: cfg.password.as_ref().map_or(false, |p| !p.is_empty()),
@@ -133,8 +145,13 @@ async fn main() -> anyhow::Result<()> {
                 rx.borrow_and_update();
                 let a = app.clone();
                 if let Ok(eng) = tokio::task::spawn_blocking(move || Engine::build(&a)).await {
+                    // Les listes, règles et réécritures n'influencent pas le contenu du cache : on ne le vide
+                    // que si les upstreams ou DNSSEC ont changé.
+                    let changed = app.engine.load().cache_sig != eng.cache_sig;
                     app.engine.store(Arc::new(eng));
-                    app.cache.lock().clear();
+                    if changed {
+                        app.cache.lock().clear();
+                    }
                 }
             }
         });
@@ -183,23 +200,43 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tokio::spawn(lists::run(app.clone()));
+    tokio::spawn(snapshots::run(app.clone()));
+    // Nettoyage quotidien des marqueurs de suppression que tous les nœuds ont reçus.
+    {
+        let app = app.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
+                let n = app.store.compact(api_extra::TOMBSTONE_MIN_AGE_MS, &api_extra::peer_ids(&app));
+                if n > 0 {
+                    tracing::info!("nettoyage : {n} marqueur(s) de suppression retiré(s)");
+                }
+            }
+        });
+    }
     tokio::spawn(sync::run(app.clone()));
 
     // Serveur DNS : une erreur d'écoute (port 53 occupé) n'empêche pas l'interface de démarrer.
     {
         let app = app.clone();
         tokio::spawn(async move {
-            if let Err(e) = dnsserver::run(app).await {
+            if let Err(e) = dnsserver::run(app.clone()).await {
                 tracing::error!("serveur DNS arrêté : {e}");
+                *app.dns_error.lock() = e.to_string();
             }
         });
     }
+
+    tls::refresh_sync_client(&app);
+
+    let router = api::router(app.clone());
+    tokio::spawn(tls::run(app.clone(), router.clone()));
 
     let listener = tokio::net::TcpListener::bind(&cfg.http_listen)
         .await
         .map_err(|e| anyhow::anyhow!("écoute HTTP sur {} impossible : {e}", cfg.http_listen))?;
     tracing::info!("interface web sur http://{}", cfg.http_listen);
-    let router = api::router(app.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let router = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
     let a = app.clone();
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {

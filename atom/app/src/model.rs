@@ -18,6 +18,8 @@ pub struct Settings {
     pub timeout_ms: u64,
     pub pause_until: Option<u64>,
     pub log_enabled: bool,
+    /// Demande aux upstreams de valider DNSSEC (bit AD/DO) et signale le résultat dans le journal.
+    pub dnssec: bool,
 }
 
 impl Default for Settings {
@@ -32,6 +34,7 @@ impl Default for Settings {
             timeout_ms: 3000,
             pause_until: None,
             log_enabled: true,
+            dnssec: false,
         }
     }
 }

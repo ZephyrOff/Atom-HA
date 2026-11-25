@@ -15,7 +15,7 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -28,9 +28,12 @@ use std::time::Duration;
 #[folder = "ui/"]
 struct Ui;
 
-type Res = Result<Json<Value>, ApiErr>;
+pub type Res = Result<Json<Value>, ApiErr>;
 
-pub struct ApiErr(StatusCode, String);
+#[derive(Clone)]
+pub struct Actor(pub String);
+
+pub struct ApiErr(pub StatusCode, pub String);
 
 impl IntoResponse for ApiErr {
     fn into_response(self) -> Response {
@@ -38,7 +41,7 @@ impl IntoResponse for ApiErr {
     }
 }
 
-fn bad(msg: impl Into<String>) -> ApiErr {
+pub fn bad(msg: impl Into<String>) -> ApiErr {
     ApiErr(StatusCode::BAD_REQUEST, msg.into())
 }
 
@@ -80,6 +83,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/sync/pull", post(sync_pull))
         .route("/api/sync/hello", post(sync_hello))
         .route("/api/sync/notify", post(sync_notify))
+        .merge(crate::api_extra::routes())
+        .merge(crate::api_tls::routes())
         .fallback(static_files)
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(app.clone(), auth))
@@ -182,14 +187,42 @@ async fn auth(State(app): State<Arc<App>>, req: Request, next: Next) -> Response
     resp
 }
 
-async fn gate(app: &Arc<App>, req: Request, next: Next, peer: Option<SocketAddr>, ingress: bool) -> Response {
+async fn gate(app: &Arc<App>, mut req: Request, next: Next, peer: Option<SocketAddr>, ingress: bool) -> Response {
     let path = req.uri().path().to_string();
     let headers = req.headers().clone();
     let unsafe_method = !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS);
     let ip = peer.map(|p| client_ip(app, &p, &headers)).unwrap_or_default();
 
+    let is_tls = req.extensions().get::<crate::tls::IsTls>().is_some();
+    let peer_cert = req.extensions().get::<crate::tls::PeerCert>().cloned();
+
+    // Redirection de l'interface vers HTTPS quand elle est demandée.
+    if !is_tls && !ingress && !path.starts_with("/api/sync/") {
+        let st = app.node.lock().tls.clone();
+        let port = *app.tls_listening.lock();
+        if let (true, Some(port)) = (st.redirect_http, port) {
+            let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
+            let bare = host.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map_or(host, |(h, _)| h);
+            let target = if st.hostname.is_empty() { bare.to_string() } else { st.hostname.clone() };
+            let pq = req.uri().path_and_query().map_or("/", |p| p.as_str());
+            if let Ok(loc) = HeaderValue::from_str(&format!("https://{target}:{port}{pq}")) {
+                let mut r = StatusCode::PERMANENT_REDIRECT.into_response();
+                r.headers_mut().insert(header::LOCATION, loc);
+                return r;
+            }
+        }
+    }
+
     // Synchronisation entre nœuds : jeton de cluster, avec la même protection.
     if path.starts_with("/api/sync/") {
+        // Quand le chiffrement du cluster est actif, seul un nœud présentant un certificat valide est reçu
+        // (sauf pour l'appairage, qui se fait avec le code et sans certificat).
+        let mode = app.node.lock().tls.cluster_mode.clone();
+        let open_route = path == "/api/sync/enroll" || path == "/api/sync/tlsinfo";
+        if mode != "off" && !open_route && peer_cert.is_none() {
+            app.auth.event(&ip, "sync_fail", "certificat de nœud requis");
+            return (StatusCode::FORBIDDEN, Json(json!({"error": "certificat de nœud requis (chiffrement du cluster activé)"}))).into_response();
+        }
         if let Some(w) = app.auth.locked(&ip) {
             return too_many(w);
         }
@@ -204,7 +237,35 @@ async fn gate(app: &Arc<App>, req: Request, next: Next, peer: Option<SocketAddr>
             app.auth.event(&ip, "sync_fail", "jeton de cluster invalide");
             return (StatusCode::UNAUTHORIZED, Json(json!({"error": "jeton de cluster invalide"}))).into_response();
         }
+        if let Some(pc) = &peer_cert {
+            tracing::debug!("synchro reçue de {} (empreinte {})", pc.subject, pc.fingerprint);
+        }
         return next.run(req).await;
+    }
+
+    // Jeton d'API : accès programmatique, sans cookie ni contrôle d'origine.
+    if let Some(tok) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .filter(|t| t.starts_with("atm_"))
+    {
+        if let Some(w) = app.auth.locked(&ip) {
+            return too_many(w);
+        }
+        return match check_api_token(app, tok, &ip, unsafe_method, &path) {
+            Ok(name) => {
+                req.extensions_mut().insert(Actor(format!("jeton {name}")));
+                next.run(req).await
+            }
+            Err((status, msg)) => {
+                if status == StatusCode::UNAUTHORIZED {
+                    app.auth.failure(&ip);
+                    app.auth.event(&ip, "login_fail", "jeton d'API invalide");
+                }
+                (status, Json(json!({"error": msg}))).into_response()
+            }
+        };
     }
 
     if !ingress && unsafe_method && !csrf_ok(&headers) {
@@ -220,7 +281,48 @@ async fn gate(app: &Arc<App>, req: Request, next: Next, peer: Option<SocketAddr>
             (StatusCode::FOUND, [(header::LOCATION, "login.html")]).into_response()
         };
     }
+    let actor = if ingress {
+        "admin (Home Assistant)"
+    } else if session_ok {
+        "admin"
+    } else {
+        "anonyme"
+    };
+    req.extensions_mut().insert(Actor(actor.into()));
     next.run(req).await
+}
+
+/// Vérifie un jeton d'API : existence, expiration, adresse du client, portée.
+fn check_api_token(app: &Arc<App>, tok: &str, ip: &str, unsafe_method: bool, path: &str) -> Result<String, (StatusCode, String)> {
+    let denied = |m: &str| (StatusCode::UNAUTHORIZED, m.to_string());
+    let forbidden = |m: &str| (StatusCode::FORBIDDEN, m.to_string());
+    let hash = auth::token_hash(tok);
+    let (id, v) = app
+        .store
+        .list("tokens")
+        .into_iter()
+        .find(|(_, v, _)| v["hash"].as_str().map_or(false, |h| state::ct_eq(h, &hash)))
+        .map(|(i, v, _)| (i, v))
+        .ok_or_else(|| denied("jeton invalide"))?;
+    if v["expires_at"].as_u64().map_or(false, |t| t < now_ms()) {
+        return Err(denied("jeton expiré"));
+    }
+    let ips: Vec<String> = v["ips"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+    if !ips.is_empty() {
+        let set = ClientSet::parse(&ips);
+        if !ip.parse::<std::net::IpAddr>().map_or(false, |a| set.contains(a)) {
+            return Err(forbidden("adresse IP non autorisée pour ce jeton"));
+        }
+    }
+    if path.starts_with("/api/tokens") || (path.starts_with("/api/auth/") && path != "/api/auth/me") || path == "/api/cluster" {
+        return Err(forbidden("cette route n'est pas accessible avec un jeton"));
+    }
+    let read_only_post = path == "/api/check" || path == "/api/resolve";
+    if unsafe_method && !read_only_post && v["scope"].as_str() != Some("write") {
+        return Err(forbidden("jeton en lecture seule"));
+    }
+    app.token_used.lock().insert(id, (now_ms(), ip.to_string()));
+    Ok(v["name"].as_str().unwrap_or("sans nom").to_string())
 }
 
 #[derive(Deserialize)]
@@ -232,6 +334,7 @@ struct LoginReq {
 async fn login(
     State(app): State<Arc<App>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    tls_ext: Option<Extension<crate::tls::IsTls>>,
     headers: HeaderMap,
     Json(r): Json<LoginReq>,
 ) -> Response {
@@ -259,7 +362,8 @@ async fn login(
         }
         let token = app.auth.create_session(&ip);
         app.auth.event(&ip, "login_ok", "");
-        let secure = is_trusted_proxy(&app, &peer)
+        let secure = tls_ext.is_some()
+            || is_trusted_proxy(&app, &peer)
             && headers
                 .get("x-forwarded-proto")
                 .and_then(|v| v.to_str().ok())
@@ -388,6 +492,7 @@ async fn info(State(app): State<Arc<App>>) -> Res {
         "version": VERSION,
         "dns_listen": app.cfg.dns_listen,
         "dns_ok": app.dns_ok.load(std::sync::atomic::Ordering::Relaxed),
+        "dns_error": app.dns_error.lock().clone(),
         "uptime_s": app.started.elapsed().as_secs(),
         "filtering_enabled": eng.settings.filtering_enabled,
         "paused_until": eng.settings.pause_until.filter(|t| *t > now_ms()),
@@ -423,7 +528,7 @@ async fn list_col(State(app): State<Arc<App>>, Path(col): Path<String>) -> Res {
     Ok(Json(Value::Array(items)))
 }
 
-async fn put_value(app: &Arc<App>, col: &str, id: &str, body: Value) -> Res {
+async fn put_value(app: &Arc<App>, col: &str, id: &str, body: Value, actor: &str) -> Res {
     check_col(col)?;
     let mut body = body;
     if let Some(o) = body.as_object_mut() {
@@ -447,7 +552,7 @@ async fn put_value(app: &Arc<App>, col: &str, id: &str, body: Value) -> Res {
             }
         }
     }
-    app.store.put(col, id, v.clone());
+    app.store.put_as(col, id, v.clone(), actor);
     if col == "lists" {
         let (a, id) = (app.clone(), id.to_string());
         tokio::spawn(async move {
@@ -457,40 +562,40 @@ async fn put_value(app: &Arc<App>, col: &str, id: &str, body: Value) -> Res {
     Ok(Json(json!({"id": id, "value": v})))
 }
 
-async fn create(State(app): State<Arc<App>>, Path(col): Path<String>, Json(body): Json<Value>) -> Res {
+async fn create(State(app): State<Arc<App>>, Extension(actor): Extension<Actor>, Path(col): Path<String>, Json(body): Json<Value>) -> Res {
     let id = state::random_hex(4);
-    put_value(&app, &col, &id, body).await
+    put_value(&app, &col, &id, body, &actor.0).await
 }
 
-async fn update(State(app): State<Arc<App>>, Path((col, id)): Path<(String, String)>, Json(body): Json<Value>) -> Res {
-    put_value(&app, &col, &id, body).await
+async fn update(State(app): State<Arc<App>>, Extension(actor): Extension<Actor>, Path((col, id)): Path<(String, String)>, Json(body): Json<Value>) -> Res {
+    put_value(&app, &col, &id, body, &actor.0).await
 }
 
-async fn remove(State(app): State<Arc<App>>, Path((col, id)): Path<(String, String)>) -> Res {
+async fn remove(State(app): State<Arc<App>>, Extension(actor): Extension<Actor>, Path((col, id)): Path<(String, String)>) -> Res {
     check_col(&col)?;
     if col == "settings" {
         return Err(bad("les réglages ne peuvent pas être supprimés"));
     }
     if col == "clients" || col == "groups" {
-        strip_scope(&app, &col, &id);
+        strip_scope(&app, &col, &id, &actor.0);
     }
     if col == "zones" {
         if let Some(z) = app.store.get("zones", &id) {
             let zname = z.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
             for (rid, rv, _) in app.store.list("records") {
                 if rv.get("zone").and_then(|v| v.as_str()) == Some(&zname) {
-                    app.store.delete("records", &rid);
+                    app.store.delete_as("records", &rid, &actor.0);
                 }
             }
         }
     }
-    app.store.delete(&col, &id);
+    app.store.delete_as(&col, &id, &actor.0);
     Ok(Json(json!({"ok": true})))
 }
 
 /// Retire un client ou un groupe supprimé des portées. Une configuration qui n'avait que lui
 /// pour portée est supprimée, plutôt que de devenir générale par erreur.
-fn strip_scope(app: &Arc<App>, kind: &str, id: &str) {
+fn strip_scope(app: &Arc<App>, kind: &str, id: &str, actor: &str) {
     for col in ["rewrites", "records"] {
         for (oid, mut v, _) in app.store.list(col) {
             let Some(arr) = v.get_mut(kind).and_then(|x| x.as_array_mut()) else { continue };
@@ -501,9 +606,9 @@ fn strip_scope(app: &Arc<App>, kind: &str, id: &str) {
             }
             let empty = |f: &str| v.get(f).and_then(|x| x.as_array()).map_or(true, |a| a.is_empty());
             if empty("clients") && empty("groups") {
-                app.store.delete(col, &oid);
+                app.store.delete_as(col, &oid, actor);
             } else {
-                app.store.put(col, &oid, v);
+                app.store.put_as(col, &oid, v, actor);
             }
         }
     }
@@ -511,7 +616,7 @@ fn strip_scope(app: &Arc<App>, kind: &str, id: &str) {
         for (cid, mut v, _) in app.store.list("clients") {
             if v.get("group").and_then(|x| x.as_str()) == Some(id) {
                 v["group"] = json!("");
-                app.store.put("clients", &cid, v);
+                app.store.put_as("clients", &cid, v, actor);
             }
         }
     }
@@ -524,14 +629,14 @@ struct ReorderReq {
     ids: Vec<String>,
 }
 
-async fn reorder(State(app): State<Arc<App>>, Json(r): Json<ReorderReq>) -> Res {
+async fn reorder(State(app): State<Arc<App>>, Extension(actor): Extension<Actor>, Json(r): Json<ReorderReq>) -> Res {
     for (i, id) in r.ids.iter().enumerate() {
         let Some(v) = app.store.get("upstreams", id) else { continue };
         let Ok(mut u) = serde_json::from_value::<UpstreamCfg>(v) else { continue };
         let order = (i + 1) as f64;
         if (u.order - order).abs() > f64::EPSILON {
             u.order = order;
-            app.store.put("upstreams", id, serde_json::to_value(&u).unwrap_or_default());
+            app.store.put_as("upstreams", id, serde_json::to_value(&u).unwrap_or_default(), &actor.0);
         }
     }
     Ok(Json(json!({"ok": true})))
@@ -599,6 +704,8 @@ async fn lists_refresh_all(State(app): State<Arc<App>>) -> Res {
 struct CheckReq {
     domain: String,
     client: Option<String>,
+    #[serde(rename = "type")]
+    qtype: Option<String>,
 }
 
 async fn check(State(app): State<Arc<App>>, Json(r): Json<CheckReq>) -> Res {
@@ -626,7 +733,10 @@ async fn check(State(app): State<Arc<App>>, Json(r): Json<CheckReq>) -> Res {
         let nx = z.rcode == dnswire::RC_NXDOMAIN;
         return Ok(Json(json!({"result": "zone", "detail": if nx { "NXDOMAIN (zone locale)" } else { "répondu par une zone locale" }})));
     }
-    match filter::check(&eng.lists, &name) {
+    let ip: std::net::IpAddr = r.client.as_deref().and_then(|c| c.trim().parse().ok()).unwrap_or_else(|| "0.0.0.0".parse().unwrap());
+    let qtype = r.qtype.as_deref().and_then(dnswire::type_from_name).unwrap_or(dnswire::T_A);
+    let fctx = filter::Ctx { ip, client_name: eng.client_name(&ident), qtype };
+    match filter::check(&eng.lists, &name, &fctx, &eng.disabled) {
         Some(h) => {
             let result = match &h.kind {
                 HitKind::Block => "blocked",
@@ -854,14 +964,14 @@ struct PauseReq {
     minutes: Option<u64>,
 }
 
-async fn pause(State(app): State<Arc<App>>, Json(r): Json<PauseReq>) -> Res {
+async fn pause(State(app): State<Arc<App>>, Extension(actor): Extension<Actor>, Json(r): Json<PauseReq>) -> Res {
     let mut s: Settings = app
         .store
         .get("settings", "main")
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
     s.pause_until = r.minutes.filter(|m| *m > 0).map(|m| now_ms() + m * 60_000);
-    app.store.put("settings", "main", serde_json::to_value(&s).unwrap_or_default());
+    app.store.put_as("settings", "main", serde_json::to_value(&s).unwrap_or_default(), &actor.0);
     Ok(Json(json!({"ok": true, "pause_until": s.pause_until})))
 }
 
@@ -882,6 +992,8 @@ async fn cluster(State(app): State<Arc<App>>) -> Res {
     Ok(Json(json!({
         "node": {"id": n.node_id, "name": n.name, "advertise_url": n.advertise_url},
         "token": n.cluster_token,
+        "pairing_code": crate::api_tls::pairing_code(&app),
+        "cluster_mode": n.tls.cluster_mode,
         "peers": peers,
     })))
 }
@@ -889,11 +1001,13 @@ async fn cluster(State(app): State<Arc<App>>) -> Res {
 #[derive(Deserialize)]
 struct JoinReq {
     url: String,
+    /// Code d'appairage : le jeton du cluster, éventuellement suivi de « . » et de l'empreinte de l'autorité.
     token: String,
     self_url: String,
 }
 
 async fn cluster_join(State(app): State<Arc<App>>, Json(r): Json<JoinReq>) -> Res {
+    use crate::tls;
     let url = r.url.trim().trim_end_matches('/').to_string();
     let self_url = r.self_url.trim().trim_end_matches('/').to_string();
     if !(url.starts_with("http://") || url.starts_with("https://")) {
@@ -902,39 +1016,174 @@ async fn cluster_join(State(app): State<Arc<App>>, Json(r): Json<JoinReq>) -> Re
     if !(self_url.starts_with("http://") || self_url.starts_with("https://")) {
         return Err(bad("l'adresse de ce nœud doit commencer par http:// ou https://"));
     }
+    let code = r.token.trim().to_string();
+    let (token, code_fp) = match code.split_once('.') {
+        Some((t, f)) => (t.to_string(), f.trim().to_ascii_lowercase()),
+        None => (code.clone(), String::new()),
+    };
     let (id, name) = {
         let n = app.node.lock();
         (n.node_id.clone(), n.name.clone())
     };
-    let resp = app
-        .http
-        .post(format!("{url}/api/sync/hello"))
-        .bearer_auth(r.token.trim())
+    // Appairage : le certificat du serveur n'est pas encore connu, on le vérifie par l'empreinte du code.
+    let probe = if url.starts_with("https://") { tls::pairing_client().map_err(|e| bad(e.to_string()))? } else { app.http.clone() };
+    let info_resp = probe
+        .get(format!("{url}/api/sync/tlsinfo"))
+        .bearer_auth(&token)
         .timeout(std::time::Duration::from_secs(10))
-        .json(&json!({"id": id, "name": name, "url": self_url}))
         .send()
         .await
         .map_err(|e| bad(format!("connexion impossible : {e}")))?;
-    if resp.status() == StatusCode::UNAUTHORIZED {
+    if info_resp.status() == StatusCode::UNAUTHORIZED {
         return Err(bad("code d'appairage refusé"));
     }
-    if !resp.status().is_success() {
-        return Err(bad(format!("l'autre nœud a répondu {}", resp.status())));
+    if !info_resp.status().is_success() {
+        return Err(bad(format!("l'autre nœud a répondu {}", info_resp.status())));
     }
-    let remote: Value = resp.json().await.map_err(|e| bad(e.to_string()))?;
-    let rid = remote["id"].as_str().unwrap_or("").to_string();
-    let rname = remote["name"].as_str().unwrap_or("").to_string();
-    if rid.is_empty() || rid == id {
+    let info: Value = info_resp.json().await.map_err(|e| bad(e.to_string()))?;
+    let mode = info["mode"].as_str().unwrap_or("off").to_string();
+    let remote_fp = info["ca_fingerprint"].as_str().unwrap_or("").to_string();
+    let check_fp = |fp: &str| -> Result<(), ApiErr> {
+        if code_fp.is_empty() {
+            return Err(bad("ce cluster est chiffré : le code d'appairage doit contenir l'empreinte de l'autorité (« jeton.empreinte »), copie-le depuis la page Certificats ou Cluster de l'autre nœud"));
+        }
+        if fp.is_empty() || !fp.starts_with(&code_fp) {
+            return Err(bad("l'empreinte de l'autorité ne correspond pas à celle du code : appairage interrompu"));
+        }
+        Ok(())
+    };
+    if mode != "off" && !url.starts_with("https://") {
+        return Err(bad("ce cluster est chiffré : l'adresse de l'autre nœud doit commencer par https://"));
+    }
+    if mode != "off" && !self_url.starts_with("https://") {
+        return Err(bad("ce cluster est chiffré : l'adresse de ce nœud doit commencer par https://"));
+    }
+    let remote_id;
+    let remote_name;
+    let mut remote_ca = String::new();
+    match mode.as_str() {
+        "off" => {
+            let resp = probe
+                .post(format!("{url}/api/sync/hello"))
+                .bearer_auth(&token)
+                .timeout(std::time::Duration::from_secs(10))
+                .json(&json!({"id": id, "name": name, "url": self_url}))
+                .send()
+                .await
+                .map_err(|e| bad(format!("connexion impossible : {e}")))?;
+            if !resp.status().is_success() {
+                return Err(bad(format!("l'autre nœud a répondu {}", resp.status())));
+            }
+            let remote: Value = resp.json().await.map_err(|e| bad(e.to_string()))?;
+            remote_id = remote["id"].as_str().unwrap_or("").to_string();
+            remote_name = remote["name"].as_str().unwrap_or("").to_string();
+            // Ce nœud quitte un éventuel chiffrement précédent.
+            app.node.lock().tls.cluster_mode = "off".into();
+        }
+        "ca" => {
+            check_fp(&remote_fp)?;
+            let mut names = tls::node_names(&app);
+            if let Some(h) = tls::url_host(&self_url) {
+                names.push(h);
+            }
+            let (csr, key) = tls::gen_csr(&names, &id).map_err(|e| bad(e.to_string()))?;
+            let resp: Value = probe
+                .post(format!("{url}/api/sync/enroll"))
+                .bearer_auth(&token)
+                .timeout(std::time::Duration::from_secs(15))
+                .json(&json!({"id": id, "name": name, "url": self_url, "kind": "csr", "csr_pem": csr}))
+                .send()
+                .await
+                .map_err(|e| bad(format!("connexion impossible : {e}")))?
+                .json()
+                .await
+                .map_err(|e| bad(e.to_string()))?;
+            let (Some(crt), Some(ca)) = (resp["cert_pem"].as_str(), resp["ca_pem"].as_str()) else {
+                return Err(bad(resp["error"].as_str().unwrap_or("réponse d'appairage invalide").to_string()));
+            };
+            if !tls::fingerprint(ca).starts_with(&code_fp) {
+                return Err(bad("l'autorité reçue ne correspond pas à l'empreinte du code : appairage interrompu"));
+            }
+            tls::certified_key(crt, &key).map_err(|e| bad(e.to_string()))?;
+            tls::write(&app, "ca.crt", ca).map_err(|e| bad(e.to_string()))?;
+            tls::remove(&app, "ca.key");
+            tls::write(&app, "node.crt", crt).map_err(|e| bad(e.to_string()))?;
+            tls::write(&app, "node.key", &key).map_err(|e| bad(e.to_string()))?;
+            {
+                let mut n = app.node.lock();
+                n.tls.cluster_mode = "ca".into();
+                n.ca_url = url.clone();
+            }
+            remote_id = resp["id"].as_str().unwrap_or("").to_string();
+            remote_name = resp["name"].as_str().unwrap_or("").to_string();
+        }
+        "selfsigned" => {
+            check_fp(&remote_fp)?;
+            let mut names = tls::node_names(&app);
+            if let Some(h) = tls::url_host(&self_url) {
+                names.push(h);
+            }
+            crate::api_tls::ensure_own_ca(&app, &names).map_err(|e| bad(e.to_string()))?;
+            let mine = tls::read(&app, "ca.crt").unwrap_or_default();
+            let resp: Value = probe
+                .post(format!("{url}/api/sync/enroll"))
+                .bearer_auth(&token)
+                .timeout(std::time::Duration::from_secs(15))
+                .json(&json!({"id": id, "name": name, "url": self_url, "kind": "ca", "ca_pem": mine}))
+                .send()
+                .await
+                .map_err(|e| bad(format!("connexion impossible : {e}")))?
+                .json()
+                .await
+                .map_err(|e| bad(e.to_string()))?;
+            let Some(ca) = resp["ca_pem"].as_str() else {
+                return Err(bad(resp["error"].as_str().unwrap_or("réponse d'appairage invalide").to_string()));
+            };
+            if !tls::fingerprint(ca).starts_with(&code_fp) {
+                return Err(bad("l'autorité reçue ne correspond pas à l'empreinte du code : appairage interrompu"));
+            }
+            remote_id = resp["id"].as_str().unwrap_or("").to_string();
+            remote_name = resp["name"].as_str().unwrap_or("").to_string();
+            tls::write(&app, &format!("peers/{remote_id}.crt"), ca).map_err(|e| bad(e.to_string()))?;
+            remote_ca = ca.to_string();
+            app.node.lock().tls.cluster_mode = "selfsigned".into();
+        }
+        "pki" => {
+            if app.node.lock().tls.cluster_mode != "pki" {
+                return Err(bad("ce cluster utilise une PKI privée : importe d'abord le certificat de ce nœud dans la page Certificats"));
+            }
+            let client = app.sync_client.load_full();
+            let resp = client
+                .post(format!("{url}/api/sync/hello"))
+                .bearer_auth(&token)
+                .timeout(std::time::Duration::from_secs(10))
+                .json(&json!({"id": id, "name": name, "url": self_url}))
+                .send()
+                .await
+                .map_err(|e| bad(format!("connexion impossible (vérifie que les certificats sont signés par la même autorité et couvrent l'adresse utilisée) : {e}")))?;
+            if !resp.status().is_success() {
+                return Err(bad(format!("l'autre nœud a répondu {}", resp.status())));
+            }
+            let remote: Value = resp.json().await.map_err(|e| bad(e.to_string()))?;
+            remote_id = remote["id"].as_str().unwrap_or("").to_string();
+            remote_name = remote["name"].as_str().unwrap_or("").to_string();
+        }
+        other => return Err(bad(format!("mode de chiffrement inconnu : {other}"))),
+    }
+    if remote_id.is_empty() || remote_id == id {
         return Err(bad("réponse invalide de l'autre nœud"));
     }
     {
         let mut n = app.node.lock();
-        n.cluster_token = r.token.trim().to_string();
+        n.cluster_token = token;
         n.advertise_url = self_url;
-        n.peers.retain(|p| p.id != rid);
-        n.peers.push(Peer { id: rid, name: rname, url });
+        n.forgotten.retain(|f| f != &remote_id);
+        n.peers.retain(|p| p.id != remote_id);
+        n.peers.push(Peer { id: remote_id, name: remote_name, url, ca_pem: remote_ca });
     }
     app.save_node();
+    tls::refresh_sync_client(&app);
+    app.tls_reload.notify_one();
     app.sync_wake.notify_one();
     Ok(Json(json!({"ok": true})))
 }
@@ -945,7 +1194,14 @@ async fn cluster_sync(State(app): State<Arc<App>>) -> Res {
 }
 
 async fn peer_remove(State(app): State<Arc<App>>, Path(id): Path<String>) -> Res {
-    app.node.lock().peers.retain(|p| p.id != id);
+    {
+        let mut n = app.node.lock();
+        n.peers.retain(|p| p.id != id);
+        if !n.forgotten.contains(&id) {
+            n.forgotten.push(id.clone());
+        }
+    }
+    app.store.forget_peer(&id);
     app.peer_status.lock().remove(&id);
     app.save_node();
     Ok(Json(json!({"ok": true})))
@@ -970,8 +1226,9 @@ async fn sync_hello(State(app): State<Arc<App>>, Json(h): Json<Hello>) -> Res {
     }
     {
         let mut n = app.node.lock();
+        n.forgotten.retain(|f| f != &h.id);
         n.peers.retain(|p| p.id != h.id);
-        n.peers.push(Peer { id: h.id, name: h.name, url: h.url.trim_end_matches('/').to_string() });
+        n.peers.push(Peer { id: h.id, name: h.name, url: h.url.trim_end_matches('/').to_string(), ca_pem: String::new() });
     }
     app.save_node();
     app.sync_wake.notify_one();

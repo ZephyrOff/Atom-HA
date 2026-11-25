@@ -20,10 +20,11 @@ pub struct Outcome {
     pub list: String,
     pub upstream: String,
     pub cached: bool,
+    pub ad: bool,
 }
 
 fn out(resp: Vec<u8>, result: &'static str) -> Outcome {
-    Outcome { resp, result, reason: String::new(), list: String::new(), upstream: String::new(), cached: false }
+    Outcome { resp, result, reason: String::new(), list: String::new(), upstream: String::new(), cached: false, ad: false }
 }
 
 /// Refus lié au blocage d'accès réseau d'un client.
@@ -145,6 +146,13 @@ async fn forward_cached(app: &Arc<App>, eng: &Engine, q: &Query, req: &[u8]) -> 
     }
     let tmo = Duration::from_millis(eng.settings.timeout_ms);
     let parallel = eng.settings.upstream_mode == "parallel";
+    let sent;
+    let req = if eng.settings.dnssec {
+        sent = dnswire::with_dnssec(req);
+        &sent[..]
+    } else {
+        req
+    };
     match upstream::forward(&eng.upstreams, &app.health, parallel, &q.name, req, tmo).await {
         Ok((mut resp, name)) => {
             dnswire::set_id(&mut resp, q.id);
@@ -214,7 +222,8 @@ pub async fn resolve(app: &Arc<App>, req: &[u8], q: &Query, client: IpAddr) -> O
     let mut reason = String::new();
     let mut list = String::new();
     if eng.settings.filtering_enabled && !paused {
-        if let Some(hit) = filter::check(&eng.lists, &q.name) {
+        let fctx = filter::Ctx { ip: client, client_name: eng.client_name(&ident), qtype: q.qtype };
+        if let Some(hit) = filter::check(&eng.lists, &q.name, &fctx, &eng.disabled) {
             match hit.kind {
                 HitKind::Block => {
                     let mut o = out(answer_block(&eng, q, None), "blocked");
@@ -276,11 +285,12 @@ pub async fn resolve(app: &Arc<App>, req: &[u8], q: &Query, client: IpAddr) -> O
                     return deny(q, "LAN", &acc.who);
                 }
             }
-            Outcome { resp, result: "allowed", reason, list, upstream: up, cached }
+            let ad = eng.settings.dnssec && dnswire::is_authenticated(&resp);
+            Outcome { resp, result: "allowed", reason, list, upstream: up, cached, ad }
         }
         Err(e) => {
             let resp = dnswire::build_response(q, dnswire::RC_SERVFAIL, false, &[], &[]);
-            Outcome { resp, result: "error", reason: e, list, upstream: String::new(), cached: false }
+            Outcome { resp, result: "error", reason: e, list, upstream: String::new(), cached: false, ad: false }
         }
     }
 }
@@ -301,6 +311,7 @@ pub async fn handle(app: &Arc<App>, req: &[u8], client: IpAddr) -> Option<Vec<u8
             list: o.list,
             upstream: o.upstream,
             cached: o.cached,
+            ad: o.ad,
             ms: start.elapsed().as_millis() as u32,
             rcode,
             ..Default::default()

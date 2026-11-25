@@ -90,6 +90,10 @@ pub struct ZoneAnswer {
 pub struct Engine {
     pub settings: Settings,
     pub lists: Vec<Arc<ParsedList>>,
+    /// Règles désactivées par `$badfilter`, toutes listes confondues.
+    pub disabled: HashSet<String>,
+    /// Signature de ce qui change le contenu du cache (upstreams, DNSSEC) : le cache n'est vidé que si elle change.
+    pub cache_sig: String,
     rw_exact: HashMap<String, Vec<RewriteEntry>>,
     rw_wild: HashMap<String, Vec<RewriteEntry>>,
     zones: Vec<String>,
@@ -112,6 +116,8 @@ impl Engine {
         Self {
             settings: Settings::default(),
             lists: vec![],
+            disabled: HashSet::new(),
+            cache_sig: String::new(),
             rw_exact: HashMap::new(),
             rw_wild: HashMap::new(),
             zones: vec![],
@@ -124,6 +130,12 @@ impl Engine {
             clients: vec![],
             groups: HashMap::new(),
         }
+    }
+
+    /// Nom du client enregistré, pour les règles `$client='Nom'`.
+    pub fn client_name(&self, id: &Identity) -> Option<&str> {
+        let cid = id.client.as_ref()?;
+        self.clients.iter().find(|c| &c.id == cid).map(|c| c.access.name.as_str())
     }
 
     /// Retrouve le client enregistré (le plus précis) et son groupe à partir de l'adresse.
@@ -408,6 +420,11 @@ impl Engine {
             }
         }
         ups.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+        let cache_sig = format!(
+            "{}|{}",
+            ups.iter().map(|(_, id, u)| format!("{id}:{}:{}:{}", u.address, u.bootstrap, u.domains.join(","))).collect::<Vec<_>>().join(";"),
+            settings.dnssec
+        );
         let upstreams = ups
             .into_iter()
             .filter_map(|(_, id, u)| {
@@ -439,6 +456,7 @@ impl Engine {
             }
         }
 
-        Engine { settings, lists, rw_exact, rw_wild, zones, zone_serial, zrecs, zwild, znames, ptr, upstreams, clients, groups }
+        let disabled = crate::filter::disabled_rules(&lists);
+        Engine { settings, lists, disabled, cache_sig, rw_exact, rw_wild, zones, zone_serial, zrecs, zwild, znames, ptr, upstreams, clients, groups }
     }
 }

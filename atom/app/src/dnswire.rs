@@ -249,6 +249,48 @@ pub fn build_query(id: u16, name: &str, qtype: u16) -> Vec<u8> {
     out
 }
 
+/// Prépare une requête pour un upstream qui valide DNSSEC : bit AD dans l'en-tête et bit DO dans EDNS
+/// (ajouté si le client n'en avait pas). La réponse portera le bit AD si l'upstream a validé.
+pub fn with_dnssec(req: &[u8]) -> Vec<u8> {
+    let mut out = req.to_vec();
+    if out.len() < 12 {
+        return out;
+    }
+    out[3] |= 0x20;
+    let qd = u16::from_be_bytes([out[4], out[5]]) as usize;
+    let rr = u16::from_be_bytes([out[6], out[7]]) as usize + u16::from_be_bytes([out[8], out[9]]) as usize + u16::from_be_bytes([out[10], out[11]]) as usize;
+    let mut pos = 12;
+    for _ in 0..qd {
+        match read_name(&out, pos) {
+            Some((_, p)) => pos = p + 4,
+            None => return out,
+        }
+    }
+    for _ in 0..rr {
+        let Some((_, np)) = read_name(&out, pos) else { return out };
+        if np + 10 > out.len() {
+            return out;
+        }
+        let t = u16::from_be_bytes([out[np], out[np + 1]]);
+        let rdlen = u16::from_be_bytes([out[np + 8], out[np + 9]]) as usize;
+        if t == T_OPT {
+            out[np + 6] |= 0x80; // DO
+            return out;
+        }
+        pos = np + 10 + rdlen;
+    }
+    // Pas d'EDNS : on en ajoute un.
+    out.extend_from_slice(&[0, 0, 41, 0x04, 0xD0, 0, 0, 0x80, 0, 0, 0]);
+    let ar = u16::from_be_bytes([out[10], out[11]]) + 1;
+    out[10..12].copy_from_slice(&ar.to_be_bytes());
+    out
+}
+
+/// La réponse porte-t-elle le bit AD (données authentifiées par l'upstream) ?
+pub fn is_authenticated(resp: &[u8]) -> bool {
+    resp.len() > 3 && resp[3] & 0x20 != 0
+}
+
 pub fn set_id(buf: &mut [u8], id: u16) {
     if buf.len() >= 2 {
         buf[0..2].copy_from_slice(&id.to_be_bytes());

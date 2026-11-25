@@ -6,7 +6,7 @@
 //! immédiatement. Une interrogation périodique rattrape tout retard.
 
 use crate::qlog::LogEntry;
-use crate::state::{App, PeerStatus};
+use crate::state::{App, Peer, PeerStatus};
 use crate::store::{now_ms, Obj};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 
 #[derive(Serialize, Deserialize)]
 pub struct PullReq {
+    #[serde(default)]
+    pub node_id: String,
     pub cfg_vv: HashMap<String, u64>,
     pub log_vv: HashMap<String, u64>,
 }
@@ -23,6 +25,12 @@ pub struct PullReq {
 pub struct PullResp {
     pub node_id: String,
     pub node_name: String,
+    /// Adresse annoncée par le nœud qui répond.
+    #[serde(default)]
+    pub url: String,
+    /// Les nœuds qu'il connaît : permet de former un maillage à partir de 3 nœuds.
+    #[serde(default)]
+    pub peers: Vec<Peer>,
     pub cfg: Vec<Obj>,
     pub logs: Vec<LogEntry>,
 }
@@ -30,10 +38,11 @@ pub struct PullResp {
 const LOG_BATCH: usize = 5000;
 
 async fn pull_from(app: &Arc<App>, peer_id: &str, url: &str, token: &str) -> anyhow::Result<(usize, usize)> {
-    let req = PullReq { cfg_vv: app.store.vv(), log_vv: app.qlog.vv() };
+    let req = PullReq { node_id: app.node_id(), cfg_vv: app.store.vv(), log_vv: app.qlog.vv() };
     let t = Instant::now();
     let resp = app
-        .http
+        .sync_client
+        .load_full()
         .post(format!("{}/api/sync/pull", url.trim_end_matches('/')))
         .bearer_auth(token)
         .timeout(Duration::from_secs(15))
@@ -44,6 +53,34 @@ async fn pull_from(app: &Arc<App>, peer_id: &str, url: &str, token: &str) -> any
         anyhow::bail!("HTTP {}", resp.status());
     }
     let r: PullResp = resp.json().await?;
+    // Découverte des autres nœuds du cluster.
+    {
+        let me = app.node_id();
+        let mut n = app.node.lock();
+        let mut added = false;
+        for p in r.peers.iter() {
+            let url_ok = p.url.starts_with("http://") || p.url.starts_with("https://");
+            if p.id != me && url_ok && !n.forgotten.contains(&p.id) && !n.peers.iter().any(|x| x.id == p.id) {
+                tracing::info!("nœud « {} » découvert via {}", p.name, r.node_name);
+                n.peers.push(Peer { id: p.id.clone(), name: p.name.clone(), url: p.url.trim_end_matches('/').to_string(), ca_pem: p.ca_pem.clone() });
+                added = true;
+            }
+            // Mode « auto-signé » : on retient l'autorité des nœuds présentés par un nœud de confiance.
+            if p.id != me && n.tls.cluster_mode == "selfsigned" && !p.ca_pem.is_empty() {
+                let f = format!("peers/{}.crt", p.id);
+                if crate::tls::read(app, &f).is_none() && crate::tls::certs_from_pem(&p.ca_pem).is_ok() {
+                    let _ = crate::tls::write(app, &f, &p.ca_pem);
+                    added = true;
+                }
+            }
+        }
+        drop(n);
+        if added {
+            app.save_node();
+            crate::tls::refresh_sync_client(app);
+            app.tls_reload.notify_one();
+        }
+    }
     let (nc, nl) = (r.cfg.len(), r.logs.len());
     if nc > 0 {
         app.store.apply_remote(r.cfg);
@@ -64,9 +101,18 @@ async fn pull_from(app: &Arc<App>, peer_id: &str, url: &str, token: &str) -> any
 }
 
 pub fn answer_pull(app: &Arc<App>, req: PullReq) -> PullResp {
+    if !req.node_id.is_empty() {
+        app.store.note_peer_vv(&req.node_id, req.cfg_vv.clone());
+    }
+    let (url, peers) = {
+        let n = app.node.lock();
+        (n.advertise_url.clone(), n.peers.clone())
+    };
     PullResp {
         node_id: app.node_id(),
         node_name: app.node_name(),
+        url,
+        peers,
         cfg: app.store.pull(&req.cfg_vv),
         logs: app.qlog.pull(&req.log_vv, LOG_BATCH),
     }
@@ -105,7 +151,8 @@ async fn notify_peers(app: &Arc<App>) {
     };
     for p in peers {
         let _ = app
-            .http
+            .sync_client
+            .load_full()
             .post(format!("{}/api/sync/notify", p.url.trim_end_matches('/')))
             .bearer_auth(&token)
             .timeout(Duration::from_secs(3))

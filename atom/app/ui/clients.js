@@ -423,10 +423,12 @@ pages.access = async function (token) {
 // ---------- cache ----------
 
 pages.cache = async function (token) {
-  let q = '', selected = new Set(), data = { entries: [] };
+  let q = '', selected = new Set(), data = { entries: [] }, info = {};
   main.innerHTML = `<div class="head"><div><h1>Cache DNS</h1><p>Réponses mémorisées par ce nœud. Supprimer une entrée force une nouvelle résolution à la prochaine requête.</p></div>
     <div class="row"><button class="btn danger" id="flush">Vider tout le cache</button></div></div>
-    <div id="ctiles"></div>
+    <div id="ctiles"></div><div id="cdiag"></div>
+    <div class="card"><h2>Tester la résolution</h2><div class="row"><input class="f grow" id="ctd" placeholder="exemple.com" aria-label="Domaine à résoudre"><select class="f" id="ctt" style="width:auto" aria-label="Type"><option>A</option><option>AAAA</option><option>HTTPS</option><option>MX</option><option>TXT</option></select><button class="btn pri" id="ctest">Résoudre</button></div>
+      <div class="out" id="ctout" style="margin-top:12px" aria-live="polite"><span class="muted">Résout le nom avec ce nœud, comme le ferait un appareil. Le résultat entre dans le cache : relance deux fois pour voir « depuis le cache ».</span></div></div>
     <div class="card"><div class="row" style="margin-bottom:12px"><input class="f grow" id="cq" type="search" placeholder="Rechercher un domaine" aria-label="Rechercher dans le cache">
       <button class="btn" id="delsel" disabled>Supprimer la sélection</button><span class="muted" id="ccount"></span></div>
       <div class="tblwrap"><table><thead><tr><th><input type="checkbox" id="selall" aria-label="Tout sélectionner"></th><th>Domaine</th><th>Type</th><th>Réponse</th><th>Expire dans</th><th>Taille</th><th></th></tr></thead><tbody id="ctb"></tbody></table></div>
@@ -446,15 +448,27 @@ pages.cache = async function (token) {
       <td class="mono wrap">${e.answers.length ? esc(e.answers.join(', ')) : `<span class="muted">${e.rcode === 3 ? 'NXDOMAIN' : e.rcode === 0 ? 'sans adresse' : 'code ' + e.rcode}</span>`}</td>
       <td>${ttlText(e.ttl)}</td><td>${e.size} o</td><td><button class="btn sm danger" data-one="${esc(key(e))}">Supprimer</button></td></tr>`).join('')
       : `<tr><td colspan="7" class="empty">${q ? 'Aucune entrée ne correspond' : 'Le cache est vide'}</td></tr>`;
+    const reasons = [];
+    if (!info.dns_ok) reasons.push(`Le serveur DNS de ce nœud n'écoute pas${info.dns_error ? ' (' + info.dns_error + ')' : ''} : aucune requête n'arrive, donc le cache reste vide.`);
+    if (data.enabled === false) reasons.push('Le cache est désactivé dans les paramètres DNS.');
+    if (!data.entries.length && !q && !reasons.length) reasons.push("Aucune réponse n'est en cache. Les appareils interrogent peut-être l'autre nœud, ou les réponses ont expiré (certains sites utilisent des durées de 30 secondes). Utilise le test ci-dessous pour vérifier que ce nœud met bien les réponses en cache.");
+    $('#cdiag').innerHTML = reasons.length ? `<div class="card" style="border-color:var(--warn);margin-bottom:14px"><b>Pourquoi la liste est vide ?</b><ul style="margin:8px 0 0;padding-left:18px">${reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul></div>` : '';
     $('#ccount').textContent = q ? `${data.entries.length} sur ${data.total}` : '';
     $('#delsel').disabled = !selected.size;
     $('#delsel').textContent = selected.size ? `Supprimer la sélection (${selected.size})` : 'Supprimer la sélection';
     $('#selall').checked = data.entries.length > 0 && selected.size === data.entries.length;
   }
-  async function load() { data = await get('cache?limit=1000&search=' + encodeURIComponent(q)); draw(); }
+  async function load() { [data, info] = await Promise.all([get('cache?limit=1000&search=' + encodeURIComponent(q)), get('info')]); draw(); }
   const toEntries = list => list.map(k => { const i = k.lastIndexOf('|'); return { name: k.slice(0, i), type: k.slice(i + 1) }; });
   main.onclick = guard(async e => {
     const t = e.target.closest('button'); if (!t) return;
+    if (t.id === 'ctest') {
+      const r = await api('POST', 'resolve', { domain: $('#ctd').value, type: $('#ctt').value });
+      const [tag, cls] = RESULT[r.result] || [r.result, ''];
+      $('#ctout').innerHTML = `<span class="tag ${cls}">${tag}</span> ${r.cached ? '<span class="tag ok">depuis le cache</span>' : ''}${r.ad ? ' <span class="tag ok">DNSSEC</span>' : ''} en ${r.ms} ms${r.upstream ? ' via ' + esc(r.upstream) : ''}
+        <div class="mono" style="margin-top:6px">${r.answers.length ? esc(r.answers.join(', ')) : (r.rcode === 3 ? 'NXDOMAIN' : r.rcode ? 'code ' + r.rcode : 'aucune adresse')}</div>${r.reason ? `<div class="muted mono" style="margin-top:4px">${esc(r.reason)}</div>` : ''}`;
+      await load(); return;
+    }
     if (t.id === 'flush') {
       if (t.dataset.sure !== '1') { t.dataset.sure = '1'; t.textContent = 'Confirmer : tout vider'; setTimeout(() => { t.dataset.sure = ''; t.textContent = 'Vider tout le cache'; }, 3000); return; }
       const r = await api('POST', 'cache/flush'); toast(`${r.deleted} entrée(s) supprimée(s)`); selected.clear(); t.textContent = 'Vider tout le cache'; t.dataset.sure = ''; await load();

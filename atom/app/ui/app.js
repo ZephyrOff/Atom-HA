@@ -98,7 +98,7 @@ pages.dashboard = async function (token) {
       return list.length ? `<div class="rank ${cls}">${list.map(([n, c]) => `<div><span title="${esc(n)}">${esc(n)}</span><span class="mono">${num(c)}</span><u style="width:${c / m * 100}%"></u></div>`).join('')}</div>` : '<div class="empty">Aucune donnée</div>';
     };
     const nodes = Object.entries(st.per_node).map(([id, c]) => `<tr><td>${esc(st.node_names[id] || id)}</td><td>${num(c)}</td></tr>`).join('');
-    $('#dbody').innerHTML = `
+    $('#dbody').innerHTML = `${info.dns_error || !info.dns_ok ? `<div class="card" style="border-color:var(--bad);margin-bottom:14px"><b style="color:var(--bad)">Le serveur DNS de ce nœud n'écoute pas.</b> ${info.dns_error ? `<span class="mono">${esc(info.dns_error)}</span>` : ''}<p class="muted" style="margin-top:6px">Aucun appareil ne peut l'interroger. Le plus souvent, le port 53 est déjà utilisé (systemd-resolved, dnsmasq, un autre serveur DNS) ou demande des droits supplémentaires. Voir le README, section « Installation ».</p></div>` : ''}
       <div class="tiles">
         <div class="tile"><small>Requêtes</small><strong>${num(st.total)}</strong></div>
         <div class="tile"><small>Bloquées</small><strong>${pct.toFixed(1).replace('.', ',')} %</strong><span>${num(st.blocked)} requêtes</span></div>
@@ -135,7 +135,8 @@ pages.log = async function (token) {
       <label class="lbl grow2">Recherche<input class="f" id="q" placeholder="Domaine, règle, liste, upstream…"></label>
       <label class="lbl">Résultat<select class="f" id="st"><option value="">Tous</option><option value="blocked">Bloquées</option><option value="allowed">Autorisées</option><option value="rewritten">Réécrites</option><option value="zone">Zone locale</option><option value="cached">Depuis le cache</option><option value="error">Erreurs</option></select></label>
       <label class="lbl">Nœud<select class="f" id="nd"><option value="">Tous</option></select></label>
-      <label class="lbl">Client<input class="f" id="cl" list="clients" placeholder="Adresse IP"><datalist id="clients"></datalist></label>
+      <label class="lbl">Client enregistré<select class="f" id="cs"><option value="">Tous</option></select></label>
+      <label class="lbl">Adresse IP<input class="f" id="cl" list="clients" placeholder="192.168.1.20"><datalist id="clients"></datalist></label>
       <label class="lbl">Type<select class="f" id="ty"><option value="">Tous</option></select></label>
       <label class="lbl">Période<select class="f" id="pe"><option value="0">Tout</option><option value="15">15 dernières minutes</option><option value="60">Dernière heure</option><option value="360">6 dernières heures</option><option value="1440">24 dernières heures</option><option value="10080">7 derniers jours</option><option value="custom">Personnalisée…</option></select></label>
       <label class="lbl" id="fromw" hidden>Du<input class="f" id="from" type="datetime-local"></label>
@@ -147,8 +148,16 @@ pages.log = async function (token) {
     <div class="tblwrap"><table><thead><tr><th>Heure</th><th>Domaine</th><th>Type</th><th>Client</th><th>Nœud</th><th>Résultat</th><th>Détail</th><th>Durée</th><th></th></tr></thead><tbody id="lb"></tbody></table></div></div>`;
   let names = {};
   const stamp = ms => new Date(ms).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const csIds = () => {
+    const v = $('#cs').value;
+    if (!v) return '';
+    const [k, id] = v.split(/:(.+)/);
+    const ids = k === 'g' ? DIR.clients.filter(c => c.group === id).flatMap(c => c.ids) : (DIR.clients.find(c => c.id === id) || { ids: [] }).ids;
+    return ids.length ? ids.join(',') : '-';
+  };
+  const cname = ip => { const c = DIR.clients.find(c => c.id && ((c.ips || []).includes(ip) || c.ids.includes(ip))); return c ? c.name : ''; };
   const params = () => {
-    const p = { limit: $('#li').value, search: $('#q').value, status: $('#st').value, node: $('#nd').value, client: $('#cl').value.trim(), qtype: $('#ty').value };
+    const p = { limit: $('#li').value, search: $('#q').value, status: $('#st').value, node: $('#nd').value, client: $('#cl').value.trim(), qtype: $('#ty').value, ids: csIds() };
     const pe = $('#pe').value;
     if (pe === 'custom') {
       if ($('#from').value) p.from = new Date($('#from').value).getTime();
@@ -157,11 +166,16 @@ pages.log = async function (token) {
     return new URLSearchParams(Object.entries(p).filter(([, v]) => v !== '' && v !== undefined && !Number.isNaN(v)));
   };
   async function facets() {
-    const [f, st] = await Promise.all([get('log/facets'), get('stats')]);
+    const [f, st] = await Promise.all([get('log/facets'), get('stats'), loadDir()]);
     if (token !== routeToken) return;
     names = st.node_names;
     const fill = (sel, items) => { const cur = sel.value; sel.length = 1; items.forEach(([v, t]) => sel.add(new Option(t, v))); sel.value = cur; };
     fill($('#nd'), Object.entries(names));
+    { const cur = $('#cs').value;
+      $('#cs').innerHTML = '<option value="">Tous</option>'
+        + (DIR.groups.length ? `<optgroup label="Groupes">${DIR.groups.map(g => `<option value="g:${esc(g.id)}">${esc(g.name)}</option>`).join('')}</optgroup>` : '')
+        + (DIR.clients.some(c => c.id) ? `<optgroup label="Clients">${DIR.clients.filter(c => c.id).map(c => `<option value="c:${esc(c.id)}">${esc(c.name)}</option>`).join('')}</optgroup>` : '');
+      $('#cs').value = cur; }
     fill($('#ty'), f.qtypes.map(t => [t, t]));
     $('#clients').innerHTML = f.clients.map(c => `<option value="${esc(c)}">`).join('');
   }
@@ -172,15 +186,16 @@ pages.log = async function (token) {
     const active = [];
     if ($('#st').value) active.push($('#st').selectedOptions[0].text);
     if ($('#nd').value) active.push('nœud ' + $('#nd').selectedOptions[0].text);
-    if ($('#cl').value) active.push('client ' + $('#cl').value);
+    if ($('#cs').value) active.push($('#cs').selectedOptions[0].text);
+    if ($('#cl').value) active.push('adresse ' + $('#cl').value);
     if ($('#ty').value) active.push('type ' + $('#ty').value);
     if ($('#pe').value !== '0') active.push($('#pe').selectedOptions[0].text.toLowerCase());
     $('#chips').innerHTML = active.map(a => `<span class="tag acc">${esc(a)}</span>`).join('');
     $('#lb').innerHTML = rows.length ? rows.map(r => `<tr>
       <td class="mono" title="${esc(new Date(r.ts).toLocaleString('fr-FR'))}">${stamp(r.ts)}</td><td class="mono" title="${esc(r.name)}">${esc(r.name)}</td><td>${esc(r.qtype)}</td>
-      <td class="mono"><a href="#" class="plain" data-fcl="${esc(r.client)}" title="Filtrer sur ce client">${esc(r.client)}</a></td>
+      <td class="mono"><a href="#" class="plain" data-fcl="${esc(r.client)}" title="Filtrer sur cette adresse">${esc(r.client)}</a>${cname(r.client) ? ` <b style="font-family:var(--sans)">${esc(cname(r.client))}</b>` : ''}</td>
       <td>${esc(names[r.node] || r.node)}</td><td>${resTag(r.result, r.cached)}</td>
-      <td class="wrap muted mono">${esc(r.reason || r.list || r.upstream)}</td><td>${r.ms} ms</td>
+      <td class="wrap muted mono">${r.ad ? '<span class="tag ok" title="Réponse validée par DNSSEC">DNSSEC</span> ' : ''}${esc(r.reason || r.list || r.upstream)}</td><td>${r.ms} ms</td>
       <td>${r.result === 'blocked' ? `<button class="btn sm" data-allow="${esc(r.name)}">Autoriser</button>` : r.result === 'allowed' || r.result === 'error' ? `<button class="btn sm" data-block="${esc(r.name)}">Bloquer</button>` : ''}</td></tr>`).join('')
       : '<tr><td colspan="9" class="empty">Aucune requête ne correspond à ces filtres</td></tr>';
   }
@@ -189,7 +204,7 @@ pages.log = async function (token) {
     if (fc) { e.preventDefault(); $('#cl').value = fc.dataset.fcl; draw(); return; }
     if (e.target.id === 'reset') {
       ['q', 'cl', 'from', 'to'].forEach(i => ($('#' + i).value = ''));
-      ['st', 'nd', 'ty'].forEach(i => ($('#' + i).value = '')); $('#pe').value = '0'; $('#li').value = '200';
+      ['st', 'nd', 'ty', 'cs'].forEach(i => ($('#' + i).value = '')); $('#pe').value = '0'; $('#li').value = '200';
       $('#fromw').hidden = $('#tow').hidden = true; draw(); return;
     }
     const t = e.target.closest('[data-allow],[data-block]');
@@ -316,6 +331,8 @@ pages.dns = async function (token) {
         <div class="note">Formats : <span class="mono">8.8.8.8</span> (UDP), <span class="mono">tcp://8.8.8.8</span>, <span class="mono">tls://dns.google</span> (DoT), <span class="mono">https://dns.google/dns-query</span> (DoH). Avec des domaines dédiés, l'upstream ne sert que pour ces domaines : utile pour envoyer <span class="mono">lan</span> vers ton routeur.</div></div></div>
     <div class="cols" style="margin-top:14px">
       <div class="card"><h2>Blocage</h2><label class="lbl">Réponse pour un domaine bloqué<select class="f" id="bm"><option value="null_ip">Adresse nulle (0.0.0.0)</option><option value="nxdomain">NXDOMAIN</option><option value="refused">REFUSED</option></select></label></div>
+      <div class="card"><h2>DNSSEC</h2><div class="row">${sw(false, 'id="dsec"')}<span>Demander la validation DNSSEC aux upstreams</span></div>
+        <p class="note" style="margin-top:12px">Atom demande à l'upstream de valider les signatures (bits DO et AD) et signale dans le journal les réponses authentifiées. La validation est faite par l'upstream, pas par Atom : choisis des upstreams qui valident (Cloudflare, Quad9, Google). Une réponse falsifiée est alors refusée (SERVFAIL). Les enregistrements de signature peuvent alourdir les réponses.</p></div>
       <div class="card"><h2>Cache <span class="row"><button class="btn sm" id="flush">Vider</button></span></h2>
         <div class="row">${sw(true, 'id="ce"')}<span>Cache activé</span></div>
         <label class="lbl" style="margin-top:10px">Taille maximale (entrées)<input class="f" id="cs" type="number" min="100"></label>
@@ -346,7 +363,7 @@ pages.dns = async function (token) {
         <td class="row" style="flex-wrap:nowrap"><button class="btn sm" data-t="${u.id}">Tester</button><button class="btn sm" data-edit="${u.id}">Modifier</button><button class="btn sm danger" data-del="${u.id}">Supprimer</button></td></tr>`;
     }).join('') : '<tr><td colspan="8" class="empty">Aucun upstream : aucune requête ne pourra être résolue.</td></tr>';
     if (document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'SELECT') {
-      $('#bm').value = set.block_mode; $('#ce').checked = set.cache_enabled; $('#cs').value = set.cache_size; $('#ct').value = set.timeout_ms;
+      $('#bm').value = set.block_mode; $('#dsec').checked = !!set.dnssec; $('#ce').checked = set.cache_enabled; $('#cs').value = set.cache_size; $('#ct').value = set.timeout_ms;
     }
   }
   async function reorder(ids) { await api('POST', 'upstreams/reorder', { ids }); await load(); draw(); toast('Priorité mise à jour'); }
@@ -372,7 +389,7 @@ pages.dns = async function (token) {
   });
   $('#mode').onclick = guard(async e => { const b = e.target.closest('button'); if (!b) return; await saveSettings({ upstream_mode: b.dataset.m }); set.upstream_mode = b.dataset.m; draw(); });
   $('#csave').onclick = guard(async () => {
-    await saveSettings({ block_mode: $('#bm').value, cache_enabled: $('#ce').checked, cache_size: +$('#cs').value, timeout_ms: +$('#ct').value });
+    await saveSettings({ block_mode: $('#bm').value, dnssec: $('#dsec').checked, cache_enabled: $('#ce').checked, cache_size: +$('#cs').value, timeout_ms: +$('#ct').value });
     toast('Réglages enregistrés'); await load(); draw();
   });
   $('#flush').onclick = guard(async () => { await api('POST', 'cache/flush'); toast('Cache vidé'); });
@@ -520,14 +537,14 @@ pages.cluster = async function (token) {
         <td>${p.ok ? p.latency_ms + ' ms' : '–'}</td><td>${ago(p.last_ok)}</td><td><button class="btn sm danger" data-rm="${p.id}">Retirer</button></td></tr>`).join('')}</tbody></table></div></div>
       <div class="cols" style="margin-top:14px" id="joinbox">
         <div class="card"><h2>Ajouter ce nœud à un cluster</h2><div class="stack">
-          <label class="lbl">Adresse de l'autre nœud<input class="f" id="ju" placeholder="http://192.168.1.2:3000"></label>
-          <label class="lbl">Code d'appairage de l'autre nœud<input class="f" id="jt" placeholder="affiché sur son écran Cluster"></label>
+          <label class="lbl">Adresse de l'autre nœud<input class="f" id="ju" placeholder="http://192.168.1.2:3000 ou https://192.168.1.2:3443"></label>
+          <label class="lbl">Code d'appairage de l'autre nœud (copie-le en entier, avec l'empreinte s'il y en a une)<input class="f" id="jt" placeholder="affiché sur son écran Cluster"></label>
           <label class="lbl">Adresse de ce nœud, telle que l'autre nœud peut la joindre<input class="f" id="js" value="${esc(c.node.advertise_url || location.origin)}"></label>
           <div class="row"><button class="btn pri" id="jgo">Rejoindre</button></div>
           <p class="note">Ce nœud adopte le code de l'autre, puis récupère sa configuration. Les valeurs par défaut de ce nœud sont remplacées par celles du cluster. Si tu avais déjà modifié des réglages ici, les deux versions sont fusionnées objet par objet, la plus récente gagne.</p></div></div>
         <div class="card"><h2>Code d'appairage de ce nœud</h2>
           <p class="muted" style="margin-bottom:10px">À saisir sur l'autre nœud pour qu'il rejoigne celui-ci.</p>
-          <div class="token" id="tk">${esc(c.token)}</div>
+          <div class="token" id="tk">${esc(c.pairing_code)}</div>
           <div class="row" style="margin-top:10px"><button class="btn sm" id="cp">Copier</button></div>
           <p class="note" style="margin-top:14px">Les échanges entre nœuds passent en HTTP simple, protégés par ce code. Garde le cluster sur ton réseau local, ou place les nœuds derrière un VPN ou un reverse proxy HTTPS.</p></div></div>`;
   }
@@ -547,7 +564,7 @@ pages.cluster = async function (token) {
 };
 
 pages.security = async function (token) {
-  const [me, ev] = await Promise.all([get('auth/me'), get('auth/events')]);
+  const [me, ev, tk] = await Promise.all([get('auth/me'), get('auth/events'), get('tokens')]);
   if (token !== routeToken) return;
   const KIND = {
     login_ok: ['Connexion réussie', 'ok'], login_fail: ['Échec de connexion', 'bad'], locked: ['Adresse bloquée', 'warn'],
@@ -573,6 +590,18 @@ pages.security = async function (token) {
         ${ev.locked.length ? `<h2 style="margin-top:16px">Adresses bloquées</h2><div class="tblwrap"><table><tbody>${ev.locked.map(l => `<tr><td class="mono">${esc(l.ip)}</td><td>encore ${l.seconds} s</td></tr>`).join('')}</tbody></table></div>` : ''}
       </div>
     </div>
+    <div class="card" style="margin-top:14px"><h2>Jetons d'API</h2>
+      <p class="muted" style="margin-bottom:12px">Pour les scripts et les automatisations. Un jeton se présente dans l'en-tête <span class="mono">Authorization: Bearer atm_…</span>. Il peut être limité à la lecture et à certaines adresses. Voir la documentation de l'API dans <span class="mono">docs/API.md</span>.</p>
+      ${window.__atomNewToken ? `<div class="card" style="border-color:var(--good);margin-bottom:12px"><b>Nouveau jeton : copie-le maintenant, il ne sera plus affiché.</b><div class="token" style="margin-top:8px">${esc(window.__atomNewToken)}</div><div class="row" style="margin-top:8px"><button class="btn sm" id="tkcopy">Copier</button><button class="btn sm" id="tkdone">C'est fait</button></div></div>` : ''}
+      <div class="tblwrap"><table><thead><tr><th>Nom</th><th>Début</th><th>Droits</th><th>Adresses autorisées</th><th>Expire</th><th>Dernière utilisation</th><th></th></tr></thead><tbody>
+      ${tk.length ? tk.map(t => `<tr><td>${esc(t.name)}</td><td class="mono">${esc(t.prefix)}…</td><td><span class="tag ${t.scope === 'write' ? 'warn' : 'ok'}">${t.scope === 'write' ? 'lecture et écriture' : 'lecture seule'}</span></td>
+        <td class="mono wrap">${t.ips.length ? esc(t.ips.join(', ')) : '<span class="muted">toutes</span>'}</td><td>${t.expires_at ? (t.expires_at < Date.now() ? '<span class="tag bad">expiré</span>' : when(t.expires_at)) : 'jamais'}</td>
+        <td>${t.last_used ? `${ago(t.last_used)} <span class="muted mono">${esc(t.last_ip || '')}</span>` : '<span class="muted">jamais</span>'}</td><td><button class="btn sm danger" data-tkdel="${t.id}">Révoquer</button></td></tr>`).join('') : '<tr><td colspan="7" class="empty">Aucun jeton</td></tr>'}</tbody></table></div>
+      <h2 style="margin-top:16px">Créer un jeton</h2>
+      <div class="row"><input class="f grow" id="tkname" placeholder="Nom (ex. Home Assistant)" aria-label="Nom du jeton">
+        <select class="f" id="tkscope" style="width:auto" aria-label="Droits"><option value="read">Lecture seule</option><option value="write">Lecture et écriture</option></select>
+        <select class="f" id="tkexp" style="width:auto" aria-label="Validité"><option value="0">Sans expiration</option><option value="30">30 jours</option><option value="90">90 jours</option><option value="365">1 an</option></select></div>
+      <div class="row" style="margin-top:8px"><input class="f grow" id="tkips" placeholder="Adresses autorisées, séparées par des virgules (vide = toutes). Ex. 192.168.1.10, 192.168.1.0/24" aria-label="Adresses autorisées"><button class="btn pri" id="tkgo">Créer</button></div></div>
     <div class="card" style="margin-top:14px"><h2>Tentatives récentes</h2>
       <div class="tblwrap"><table><thead><tr><th>Date</th><th>Adresse</th><th>Événement</th><th>Détail</th></tr></thead><tbody>
       ${ev.events.length ? ev.events.map(e => { const [t, c] = KIND[e.kind] || [e.kind, '']; return `<tr><td>${when(e.ts)}</td><td class="mono">${esc(e.ip)}</td><td><span class="tag ${c}">${t}</span></td><td class="muted wrap">${esc(e.detail)}</td></tr>`; }).join('') : '<tr><td colspan="4" class="empty">Aucun événement depuis le démarrage</td></tr>'}
@@ -584,6 +613,19 @@ pages.security = async function (token) {
     await api('POST', 'auth/password', { current: $('#pc').value, new: $('#pn').value });
     toast('Mot de passe modifié');
     ['pc', 'pn', 'pn2'].forEach(i => ($('#' + i).value = ''));
+  });
+  main.onclick = guard(async e => {
+    const t = e.target.closest('button'); if (!t) return;
+    if (t.id === 'tkgo') {
+      const r = await api('POST', 'tokens', { name: $('#tkname').value, scope: $('#tkscope').value, ips: $('#tkips').value.split(/[,\s]+/).filter(Boolean), expires_in_days: +$('#tkexp').value || undefined });
+      window.__atomNewToken = r.token; toast('Jeton créé'); pages.security(token);
+    } else if (t.id === 'tkcopy') {
+      try { await navigator.clipboard.writeText(window.__atomNewToken); toast('Jeton copié'); } catch { toast('Copie impossible : sélectionne le jeton à la main', true); }
+    } else if (t.id === 'tkdone') { window.__atomNewToken = null; pages.security(token); }
+    else if (t.dataset.tkdel) {
+      if (t.dataset.sure !== '1') { t.dataset.sure = '1'; t.textContent = 'Confirmer'; setTimeout(() => { t.dataset.sure = ''; t.textContent = 'Révoquer'; }, 3000); return; }
+      await api('DELETE', `tokens/${t.dataset.tkdel}`); toast('Jeton révoqué'); pages.security(token);
+    }
   });
   $('#rev').onclick = guard(async () => { await api('POST', 'auth/revoke-others'); toast('Autres sessions fermées'); pages.security(token); });
 };

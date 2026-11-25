@@ -36,6 +36,9 @@ pub struct Peer {
     pub id: String,
     pub name: String,
     pub url: String,
+    /// Certificat d'autorité du nœud (mode « auto-signé »), transmis aux autres nœuds.
+    #[serde(default)]
+    pub ca_pem: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -50,6 +53,12 @@ pub struct NodeFile {
     pub pw_hash: String,
     pub advertise_url: String,
     pub peers: Vec<Peer>,
+    /// Nœuds retirés à la main : la propagation automatique ne les rajoute pas.
+    pub forgotten: Vec<String>,
+    /// Réglages HTTPS et chiffrement du cluster (propres à ce nœud).
+    pub tls: crate::tls::TlsSettings,
+    /// Adresse du nœud qui détient l'autorité du cluster (pour renouveler le certificat).
+    pub ca_url: String,
 }
 
 #[derive(Serialize, Clone, Debug, Default)]
@@ -93,6 +102,16 @@ pub struct App {
     pub http: reqwest::Client,
     pub dns_ok: std::sync::atomic::AtomicBool,
     pub auth: crate::auth::Auth,
+    /// Dernière erreur d'écoute du serveur DNS (port occupé, droits manquants…).
+    pub dns_error: Mutex<String>,
+    /// Dernière utilisation de chaque jeton d'API : (date, adresse).
+    pub token_used: Mutex<HashMap<String, (u64, String)>>,
+    pub tls_reload: Notify,
+    pub tls_cfg: arc_swap::ArcSwapOption<rustls::ServerConfig>,
+    pub tls_error: Mutex<String>,
+    pub tls_listening: Mutex<Option<u16>>,
+    /// Client HTTP utilisé pour parler aux autres nœuds (mTLS quand il est activé).
+    pub sync_client: ArcSwap<reqwest::Client>,
     pub cache_hits: std::sync::atomic::AtomicU64,
     pub cache_misses: std::sync::atomic::AtomicU64,
     /// Mot de passe imposé par la configuration (non modifiable dans l'interface).
