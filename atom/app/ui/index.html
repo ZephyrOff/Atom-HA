@@ -9,12 +9,14 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<div id="robanner" class="robanner" hidden>Accès en lecture seule : tu peux tout consulter, rien ne se modifie.</div>
 <div class="shell">
   <aside class="side" id="side">
     <div class="brand">
       <img src="logo.png" width="30" height="30" alt="">
       <b>Atom</b>
     </div>
+    <button class="btn searchbtn" id="searchbtn" type="button" aria-label="Rechercher">🔍 Rechercher <kbd>/</kbd></button>
     <nav id="nav">
       <a href="#dashboard" data-r="dashboard">Tableau de bord</a>
       <a href="#clients" data-r="clients">Clients</a>
@@ -27,6 +29,7 @@
       <a href="#rules" data-r="rules">Règles personnalisées</a>
       <a href="#records" data-r="records">Enregistrements</a>
       <a href="#cluster" data-r="cluster">Cluster</a>
+      <a href="#health" data-r="health">Santé</a>
       <a href="#history" data-r="history">Historique</a>
       <a href="#certs" data-r="certs">Certificats</a>
       <a href="#security" data-r="security">Sécurité</a>
@@ -36,10 +39,18 @@
     <button class="btn" id="logout" type="button">Se déconnecter</button>
   </aside>
   <main id="main" tabindex="-1"></main>
+  <div id="sov" class="overlay" hidden>
+    <div class="spanel card" role="dialog" aria-label="Recherche">
+      <input class="f" id="sq" placeholder="Domaine, client, règle, réécriture, upstream…" autocomplete="off" aria-label="Recherche">
+      <div id="sres" class="sres"></div>
+      <p class="muted" style="font-size:12px">Entrée pour ouvrir · Échap pour fermer</p>
+    </div>
+  </div>
 </div>
 <div id="toast" role="status" aria-live="polite"></div>
 <script src="app.js"></script>
 <script src="clients.js"></script>
 <script src="admin.js"></script>
+<script src="extra.js"></script>
 </body>
 </html>

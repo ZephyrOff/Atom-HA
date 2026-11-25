@@ -1,5 +1,6 @@
 mod api;
 mod api_extra;
+mod api_more;
 mod api_tls;
 mod auth;
 mod clients;
@@ -124,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
         cache_hits: Default::default(),
         cache_misses: Default::default(),
         pw_locked: cfg.password.as_ref().map_or(false, |p| !p.is_empty()),
+        cert_log: Mutex::new(Vec::new()),
     });
 
     // Premier moteur, construit avant d'accepter des requêtes.
@@ -217,6 +219,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
     tokio::spawn(sync::run(app.clone()));
+    tokio::spawn(api_more::run(app.clone()));
 
     // Serveur DNS : une erreur d'écoute (port 53 occupé) n'empêche pas l'interface de démarrer.
     {

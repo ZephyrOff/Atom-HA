@@ -3,7 +3,7 @@
 use crate::dnswire::{self, Query, Rr};
 use crate::clients::{ClientSet, Identity};
 use crate::filter::ParsedList;
-use crate::model::{self, ClientCfg, GroupCfg, ListCfg, RecordCfg, RewriteCfg, Settings, UpstreamCfg, ZoneCfg};
+use crate::model::{self, ClientCfg, GroupCfg, ListCfg, RecordCfg, RewriteCfg, Settings, TempAllow, UpstreamCfg, ZoneCfg};
 use crate::state::App;
 use crate::upstream::Upstream;
 use std::collections::{HashMap, HashSet};
@@ -105,6 +105,8 @@ pub struct Engine {
     pub upstreams: Vec<Arc<Upstream>>,
     pub clients: Vec<ClientEntry>,
     pub groups: HashMap<String, AccessEntry>,
+    /// Domaines autorisés temporairement : (domaine, fin en ms).
+    pub temp_allow: Vec<(String, u64)>,
 }
 
 fn parents(name: &str) -> impl Iterator<Item = &str> {
@@ -129,7 +131,16 @@ impl Engine {
             upstreams: vec![],
             clients: vec![],
             groups: HashMap::new(),
+            temp_allow: vec![],
         }
+    }
+
+    /// Domaine d'une autorisation temporaire encore valable pour ce nom (le domaine lui-même ou un parent).
+    pub fn temp_allowed(&self, name: &str, now: u64) -> Option<&str> {
+        self.temp_allow
+            .iter()
+            .find(|(d, until)| *until > now && (name == d || name.strip_suffix(d.as_str()).map_or(false, |p| p.ends_with('.'))))
+            .map(|(d, _)| d.as_str())
     }
 
     /// Nom du client enregistré, pour les règles `$client='Nom'`.
@@ -422,13 +433,13 @@ impl Engine {
         ups.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
         let cache_sig = format!(
             "{}|{}",
-            ups.iter().map(|(_, id, u)| format!("{id}:{}:{}:{}", u.address, u.bootstrap, u.domains.join(","))).collect::<Vec<_>>().join(";"),
+            ups.iter().map(|(_, id, u)| format!("{id}:{}:{}:{}:{}", u.address, u.bootstrap, u.domains.join(","), u.backup)).collect::<Vec<_>>().join(";"),
             settings.dnssec
         );
         let upstreams = ups
             .into_iter()
             .filter_map(|(_, id, u)| {
-                Upstream::new(&id, &u.name, &u.address, &u.bootstrap, u.domains.clone())
+                Upstream::new(&id, &u.name, &u.address, &u.bootstrap, u.domains.clone(), u.backup)
                     .map(Arc::new)
                     .map_err(|e| tracing::warn!("upstream {} ignoré : {e}", u.name))
                     .ok()
@@ -456,7 +467,29 @@ impl Engine {
             }
         }
 
+        let temp_allow: Vec<(String, u64)> = store
+            .list("tempallow")
+            .into_iter()
+            .filter_map(|(_, v, _)| serde_json::from_value::<TempAllow>(v).ok())
+            .map(|t| (t.domain, t.until))
+            .collect();
+
         let disabled = crate::filter::disabled_rules(&lists);
-        Engine { settings, lists, disabled, cache_sig, rw_exact, rw_wild, zones, zone_serial, zrecs, zwild, znames, ptr, upstreams, clients, groups }
+        Engine { settings, lists, disabled, cache_sig, rw_exact, rw_wild, zones, zone_serial, zrecs, zwild, znames, ptr, upstreams, clients, groups, temp_allow }
+    }
+}
+
+#[cfg(test)]
+mod temp_tests {
+    use super::*;
+
+    #[test]
+    fn temp_allow_matches_domain_and_subdomains_until_expiry() {
+        let mut e = Engine::empty();
+        e.temp_allow = vec![("exemple.com".into(), 2_000)];
+        assert_eq!(e.temp_allowed("exemple.com", 1_000), Some("exemple.com"));
+        assert_eq!(e.temp_allowed("cdn.exemple.com", 1_000), Some("exemple.com"));
+        assert_eq!(e.temp_allowed("autreexemple.com", 1_000), None);
+        assert_eq!(e.temp_allowed("exemple.com", 3_000), None);
     }
 }

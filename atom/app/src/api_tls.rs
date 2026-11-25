@@ -132,6 +132,7 @@ async fn web_import(State(app): State<Arc<App>>, Json(r): Json<PemPair>) -> Res 
     tls::certified_key(&r.cert_pem, &r.key_pem).map_err(err)?;
     tls::write(&app, "web.crt", &r.cert_pem).map_err(err)?;
     tls::write(&app, "web.key", &r.key_pem).map_err(err)?;
+    app.node.lock().tls.web_generated = false;
     reload(&app);
     Ok(Json(json!({"ok": true, "info": info_of(&app, "web.crt")})))
 }
@@ -141,14 +142,12 @@ struct GenReq {
     hostname: Option<String>,
 }
 
-async fn web_generate(State(app): State<Arc<App>>, Json(r): Json<GenReq>) -> Res {
-    if let Some(h) = r.hostname.as_ref().map(|h| h.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()) {
-        app.node.lock().tls.hostname = h;
-    }
-    let names = tls::node_names(&app);
+/// Génère (ou régénère) le certificat de l'interface. Retourne `true` s'il est signé par l'autorité du cluster.
+fn generate_web(app: &Arc<App>) -> Result<bool, ApiErr> {
+    let names = tls::node_names(app);
     let cn = app.node.lock().tls.hostname.clone();
     let cn = if cn.is_empty() { app.node_name() } else { cn };
-    let (crt, key, signed_by_ca) = match (tls::read(&app, "ca.crt"), tls::read(&app, "ca.key")) {
+    let (crt, key, signed_by_ca) = match (tls::read(app, "ca.crt"), tls::read(app, "ca.key")) {
         (Some(ca), Some(cak)) => {
             let (c, k) = tls::issue_leaf(&ca, &cak, &names, &cn, LEAF_DAYS).map_err(err)?;
             (c, k, true)
@@ -158,10 +157,22 @@ async fn web_generate(State(app): State<Arc<App>>, Json(r): Json<GenReq>) -> Res
             (c, k, false)
         }
     };
-    tls::write(&app, "web.crt", &crt).map_err(err)?;
-    tls::write(&app, "web.key", &key).map_err(err)?;
-    app.node.lock().tls.web_enabled = true;
-    reload(&app);
+    tls::write(app, "web.crt", &crt).map_err(err)?;
+    tls::write(app, "web.key", &key).map_err(err)?;
+    {
+        let mut n = app.node.lock();
+        n.tls.web_enabled = true;
+        n.tls.web_generated = true;
+    }
+    reload(app);
+    Ok(signed_by_ca)
+}
+
+async fn web_generate(State(app): State<Arc<App>>, Json(r): Json<GenReq>) -> Res {
+    if let Some(h) = r.hostname.as_ref().map(|h| h.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()) {
+        app.node.lock().tls.hostname = h;
+    }
+    let signed_by_ca = generate_web(&app)?;
     Ok(Json(json!({"ok": true, "signed_by_ca": signed_by_ca, "info": info_of(&app, "web.crt")})))
 }
 
@@ -172,6 +183,7 @@ async fn web_remove(State(app): State<Arc<App>>) -> Res {
         let mut n = app.node.lock();
         n.tls.web_enabled = false;
         n.tls.redirect_http = false;
+        n.tls.web_generated = false;
     }
     reload(&app);
     Ok(Json(json!({"ok": true})))
@@ -286,14 +298,15 @@ async fn cluster_resume(State(app): State<Arc<App>>) -> Res {
     Ok(Json(json!({"ok": true})))
 }
 
-async fn cluster_renew(State(app): State<Arc<App>>) -> Res {
+/// Renouvelle le certificat de ce nœud pour le chiffrement du cluster.
+pub async fn renew_node(app: &Arc<App>) -> Result<(), ApiErr> {
     let mode = app.node.lock().tls.cluster_mode.clone();
     match mode.as_str() {
-        "ca" | "selfsigned" if tls::read(&app, "ca.key").is_some() => {
-            let (ca, cak) = (tls::read(&app, "ca.crt").unwrap_or_default(), tls::read(&app, "ca.key").unwrap_or_default());
-            let (crt, key) = tls::issue_leaf(&ca, &cak, &tls::node_names(&app), &app.node_name(), LEAF_DAYS).map_err(err)?;
-            tls::write(&app, "node.crt", &crt).map_err(err)?;
-            tls::write(&app, "node.key", &key).map_err(err)?;
+        "ca" | "selfsigned" if tls::read(app, "ca.key").is_some() => {
+            let (ca, cak) = (tls::read(app, "ca.crt").unwrap_or_default(), tls::read(app, "ca.key").unwrap_or_default());
+            let (crt, key) = tls::issue_leaf(&ca, &cak, &tls::node_names(app), &app.node_name(), LEAF_DAYS).map_err(err)?;
+            tls::write(app, "node.crt", &crt).map_err(err)?;
+            tls::write(app, "node.key", &key).map_err(err)?;
         }
         "ca" => {
             let (url, token) = {
@@ -303,7 +316,7 @@ async fn cluster_renew(State(app): State<Arc<App>>) -> Res {
             if url.is_empty() {
                 return Err(bad("adresse du nœud qui détient l'autorité inconnue"));
             }
-            let (csr, key) = tls::gen_csr(&tls::node_names(&app), &app.node_id()).map_err(err)?;
+            let (csr, key) = tls::gen_csr(&tls::node_names(app), &app.node_id()).map_err(err)?;
             let client = app.sync_client.load_full();
             let resp: Value = client
                 .post(format!("{url}/api/sync/enroll"))
@@ -317,14 +330,32 @@ async fn cluster_renew(State(app): State<Arc<App>>) -> Res {
                 .map_err(err)?;
             let crt = resp["cert_pem"].as_str().ok_or_else(|| bad(resp["error"].as_str().unwrap_or("réponse invalide").to_string()))?;
             tls::certified_key(crt, &key).map_err(err)?;
-            tls::write(&app, "node.crt", crt).map_err(err)?;
-            tls::write(&app, "node.key", &key).map_err(err)?;
+            tls::write(app, "node.crt", crt).map_err(err)?;
+            tls::write(app, "node.key", &key).map_err(err)?;
         }
         "pki" => return Err(bad("renouvelle le certificat dans ta PKI, puis importe-le à nouveau")),
         _ => return Err(bad("le chiffrement du cluster n'est pas activé")),
     }
-    reload(&app);
+    reload(app);
+    Ok(())
+}
+
+async fn cluster_renew(State(app): State<Arc<App>>) -> Res {
+    renew_node(&app).await?;
     Ok(Json(json!({"ok": true, "node": info_of(&app, "node.crt")})))
+}
+
+/// Régénère le certificat de l'interface s'il a été créé par Atom. Retourne `false` s'il ne peut pas l'être.
+pub fn renew_web(app: &Arc<App>) -> Result<bool, ApiErr> {
+    let Some(info) = tls::read(app, "web.crt").and_then(|p| tls::cert_info(&p).ok()) else { return Ok(false) };
+    let own_ca = tls::read(app, "ca.key").is_some();
+    let self_signed = info.subject == info.issuer;
+    let ours = app.node.lock().tls.web_generated || info.issuer.contains("Atom");
+    if !ours || !(own_ca || self_signed) {
+        return Ok(false);
+    }
+    generate_web(app)?;
+    Ok(true)
 }
 
 async fn ca_download(State(app): State<Arc<App>>) -> Response {

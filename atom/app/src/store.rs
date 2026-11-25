@@ -137,6 +137,7 @@ pub fn summarize(col: &str, v: &Value) -> String {
         "zones" | "lists" | "clients" | "groups" | "tokens" => s("name"),
         "upstreams" => format!("{} ({})", s("name"), s("address")),
         "rules" => "règles personnalisées".into(),
+        "tempallow" => format!("{} (autorisation temporaire)", s("domain")),
         "settings" => "réglages DNS".into(),
         _ => String::new(),
     }

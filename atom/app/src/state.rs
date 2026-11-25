@@ -54,6 +54,8 @@ pub struct NodeFile {
     /// Ancien format (SHA-256 salé), migré à la première connexion.
     pub pw_salt: String,
     pub pw_hash: String,
+    /// Mot de passe d'un second accès, en lecture seule (propre à ce nœud).
+    pub ro_pw: Option<crate::auth::PwHash>,
     pub advertise_url: String,
     pub peers: Vec<Peer>,
     /// Nœuds retirés à la main : la propagation automatique ne les rajoute pas.
@@ -71,6 +73,13 @@ pub struct PeerStatus {
     pub last_error: Option<String>,
     pub latency_ms: u64,
     pub name: String,
+    pub version: String,
+    /// Écart d'horloge estimé avec ce nœud (positif = son horloge avance).
+    pub skew_ms: i64,
+    pub cert_expires: Option<u64>,
+    pub dns_ok: Option<bool>,
+    /// Nombre de modifications de configuration que ce nœud n'a pas encore reçues de nous.
+    pub behind_ops: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -119,6 +128,8 @@ pub struct App {
     pub cache_misses: std::sync::atomic::AtomicU64,
     /// Mot de passe imposé par la configuration (non modifiable dans l'interface).
     pub pw_locked: bool,
+    /// Dernières opérations automatiques sur les certificats : (date, message).
+    pub cert_log: Mutex<Vec<(u64, String)>>,
 }
 
 pub fn random_hex(n: usize) -> String {

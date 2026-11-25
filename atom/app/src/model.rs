@@ -48,6 +48,8 @@ pub struct UpstreamCfg {
     pub enabled: bool,
     pub order: f64,
     pub domains: Vec<String>,
+    /// Upstream de secours : interrogé seulement quand les autres n'ont pas répondu.
+    pub backup: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -124,7 +126,16 @@ pub struct CustomRules {
     pub text: String,
 }
 
-pub const COLLECTIONS: &[&str] = &["settings", "upstreams", "lists", "rewrites", "zones", "records", "rules", "clients", "groups"];
+/// Domaine autorisé temporairement : le filtrage est ignoré jusqu'à `until` (ms depuis 1970).
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct TempAllow {
+    pub domain: String,
+    pub until: u64,
+    pub note: String,
+}
+
+pub const COLLECTIONS: &[&str] = &["settings", "upstreams", "lists", "rewrites", "zones", "records", "rules", "clients", "groups", "tempallow"];
 
 pub fn norm_domain(s: &str) -> String {
     s.trim().trim_end_matches('.').to_ascii_lowercase()
@@ -272,6 +283,17 @@ pub fn validate(col: &str, v: Value) -> Result<Value, String> {
             }
             Ok(ser(&c))
         }
+        "tempallow" => {
+            let mut t: TempAllow = de(v)?;
+            t.domain = norm_domain(&t.domain);
+            if !valid_hostname(&t.domain) {
+                return Err("domaine invalide".into());
+            }
+            if t.until == 0 {
+                return Err("la date de fin est obligatoire".into());
+            }
+            Ok(ser(&t))
+        }
         "groups" => {
             let mut g: GroupCfg = de(v)?;
             g.name = g.name.trim().to_string();
@@ -302,6 +324,7 @@ pub fn seed_defaults(store: &crate::store::Store) {
                 enabled: true,
                 order,
                 domains: vec![],
+                backup: false,
             }),
         );
     }

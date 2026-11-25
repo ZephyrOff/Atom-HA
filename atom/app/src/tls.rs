@@ -37,11 +37,13 @@ pub struct TlsSettings {
     pub cluster_mode: String,
     /// Mode utilisé avant la désactivation, pour pouvoir le réactiver sans refaire l'appairage.
     pub previous_mode: String,
+    /// Le certificat de l'interface a été généré par Atom (il peut donc être renouvelé automatiquement).
+    pub web_generated: bool,
 }
 
 impl Default for TlsSettings {
     fn default() -> Self {
-        Self { web_enabled: false, web_port: 3443, hostname: String::new(), redirect_http: false, cluster_mode: "off".into(), previous_mode: String::new() }
+        Self { web_enabled: false, web_port: 3443, hostname: String::new(), redirect_http: false, cluster_mode: "off".into(), previous_mode: String::new(), web_generated: false }
     }
 }
 
@@ -251,6 +253,14 @@ pub fn cert_info_der(der: &[u8]) -> Result<CertInfo> {
         fingerprint: fingerprint_der(der),
         is_ca: c.is_ca(),
     })
+}
+
+/// Fin de validité du certificat de ce nœud quand le chiffrement du cluster est actif.
+pub fn own_cert_expiry(app: &App) -> Option<u64> {
+    if app.node.lock().tls.cluster_mode == "off" {
+        return None;
+    }
+    read(app, "node.crt").and_then(|p| cert_info(&p).ok()).map(|i| i.not_after)
 }
 
 pub fn cert_info(pem: &str) -> Result<CertInfo> {

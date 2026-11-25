@@ -25,6 +25,7 @@ pub struct Upstream {
     pub id: String,
     pub name: String,
     pub domains: Vec<String>,
+    pub backup: bool,
     pub proto: Proto,
     https: Option<reqwest::Client>,
 }
@@ -114,7 +115,7 @@ fn rand_u16() -> u16 {
 }
 
 impl Upstream {
-    pub fn new(id: &str, name: &str, address: &str, bootstrap: &str, domains: Vec<String>) -> Result<Self> {
+    pub fn new(id: &str, name: &str, address: &str, bootstrap: &str, domains: Vec<String>, backup: bool) -> Result<Self> {
         let proto = parse_address(address, bootstrap)?;
         let https = if let Proto::Https { host, port, bootstrap, .. } = &proto {
             let mut b = reqwest::Client::builder().timeout(Duration::from_secs(10)).pool_idle_timeout(Duration::from_secs(60));
@@ -125,7 +126,7 @@ impl Upstream {
         } else {
             None
         };
-        Ok(Self { id: id.into(), name: name.into(), domains, proto, https })
+        Ok(Self { id: id.into(), name: name.into(), domains, backup, proto, https })
     }
 
     /// Envoie la requête et retourne la réponse brute (l'ID de la réponse est celui de `req`).
@@ -300,6 +301,22 @@ pub async fn forward(
     if cands.is_empty() {
         bail!("aucun upstream actif");
     }
+    // Les upstreams de secours ne servent que si tous les autres ont échoué.
+    let (backups, primary): (Vec<_>, Vec<_>) = cands.into_iter().partition(|u| u.backup);
+    if primary.is_empty() {
+        return forward_set(backups, health, parallel, req, tmo).await;
+    }
+    match forward_set(primary, health, parallel, req, tmo).await {
+        Ok(r) => Ok(r),
+        Err(e) if backups.is_empty() => Err(e),
+        Err(e) => match forward_set(backups, health, false, req, tmo).await {
+            Ok((b, n)) => Ok((b, format!("{n} (secours)"))),
+            Err(e2) => Err(anyhow!("{e} ; secours : {e2}")),
+        },
+    }
+}
+
+async fn forward_set(cands: Vec<Arc<Upstream>>, health: &HealthMap, parallel: bool, req: &[u8], tmo: Duration) -> Result<(Vec<u8>, String)> {
     let (mut up, down): (Vec<_>, Vec<_>) = cands.into_iter().partition(|u| !is_down(health, &u.id));
     up.extend(down);
     let ok_resp = |resp: &[u8]| dnswire::response_info(resp).map_or(false, |i| i.rcode != dnswire::RC_SERVFAIL);

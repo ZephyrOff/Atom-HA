@@ -58,6 +58,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/auth/revoke-others", post(revoke_others))
         .route("/api/auth/events", get(auth_events))
         .route("/api/auth/unlock", post(auth_unlock))
+        .route("/api/auth/readonly", post(set_readonly))
         .route("/api/info", get(info))
         .route("/api/c/{col}", get(list_col).post(create))
         .route("/api/c/{col}/{id}", put(update).delete(remove))
@@ -85,6 +86,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/sync/hello", post(sync_hello))
         .route("/api/sync/notify", post(sync_notify))
         .merge(crate::api_extra::routes())
+        .merge(crate::api_more::routes())
         .merge(crate::api_tls::routes())
         .fallback(static_files)
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
@@ -318,6 +320,11 @@ async fn gate(app: &Arc<App>, mut req: Request, next: Next, peer: Option<SocketA
             (StatusCode::FOUND, [(header::LOCATION, "login.html")]).into_response()
         };
     }
+    if session_ok && !ingress && session_token(&headers).map_or(false, |t| app.auth.is_ro(&t)) {
+        if let Some(m) = readonly_denied(&path, unsafe_method) {
+            return (StatusCode::FORBIDDEN, Json(json!({"error": m}))).into_response();
+        }
+    }
     let actor = if ingress {
         "admin (Home Assistant)"
     } else if session_ok {
@@ -327,6 +334,18 @@ async fn gate(app: &Arc<App>, mut req: Request, next: Next, peer: Option<SocketA
     };
     req.extensions_mut().insert(Actor(actor.into()));
     next.run(req).await
+}
+
+/// Routes interdites à une session en lecture seule : toute modification, plus ce qui révèle des secrets.
+fn readonly_denied(path: &str, unsafe_method: bool) -> Option<&'static str> {
+    const SECRET: &[&str] = &["/api/tokens", "/api/backup", "/api/tls/", "/api/cluster", "/api/auth/events", "/api/auth/readonly"];
+    if SECRET.iter().any(|p| path.starts_with(p)) {
+        return Some("accès en lecture seule : cette page est réservée à l'administrateur");
+    }
+    if unsafe_method && !matches!(path, "/api/auth/logout" | "/api/check" | "/api/resolve") {
+        return Some("accès en lecture seule : modification impossible");
+    }
+    None
 }
 
 /// Vérifie un jeton d'API : existence, expiration, adresse du client, portée.
@@ -381,11 +400,15 @@ async fn login(
     }
     let node = app.node.lock().clone();
     let pw = r.password.clone();
-    let pw_ok = tokio::task::spawn_blocking(move || auth::verify_pw(&node, &pw)).await.unwrap_or(false);
-    if pw_ok && r.username == "admin" {
+    // Deux accès : « admin » (tous les droits) et « lecture » (consultation seule, mot de passe distinct).
+    let ro_login = r.username == "lecture";
+    let pw_ok = tokio::task::spawn_blocking(move || if ro_login { auth::verify_ro(&node, &pw) } else { auth::verify_pw(&node, &pw) })
+        .await
+        .unwrap_or(false);
+    if pw_ok && (r.username == "admin" || ro_login) {
         app.auth.success(&ip);
         // Migration de l'ancien format de hash.
-        let migrate = app.node.lock().pw.is_none();
+        let migrate = !ro_login && app.node.lock().pw.is_none();
         if migrate {
             let pw = r.password.clone();
             if let Ok(h) = tokio::task::spawn_blocking(move || auth::hash_pw(&pw)).await {
@@ -397,8 +420,8 @@ async fn login(
                 app.save_node();
             }
         }
-        let token = app.auth.create_session(&ip);
-        app.auth.event(&ip, "login_ok", "");
+        let token = app.auth.create_session(&ip, ro_login);
+        app.auth.event(&ip, "login_ok", if ro_login { "accès en lecture seule" } else { "" });
         let secure = tls_ext.is_some()
             || is_trusted_proxy(&app, &peer)
             && headers
@@ -431,11 +454,14 @@ async fn logout(State(app): State<Arc<App>>, ConnectInfo(peer): ConnectInfo<Sock
 
 async fn me(State(app): State<Arc<App>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Res {
     let ingress = app.cfg.trusted_ip.as_deref() == Some(peer.ip().to_string().as_str());
-    let session = session_token(&headers).map_or(false, |t| app.auth.validate(&t));
+    let tok = session_token(&headers);
+    let session = tok.as_deref().map_or(false, |t| app.auth.validate(t));
+    let ro = !ingress && session && tok.as_deref().map_or(false, |t| app.auth.is_ro(t));
     Ok(Json(json!({
         "authenticated": ingress || session,
         "ingress": ingress,
-        "user": "admin",
+        "readonly": ro,
+        "user": if ro { "lecture" } else { "admin" },
         "pw_locked": app.pw_locked,
     })))
 }
@@ -502,9 +528,34 @@ async fn auth_unlock(State(app): State<Arc<App>>, Extension(actor): Extension<Ac
     Ok(Json(json!({"ok": true, "unlocked": n})))
 }
 
+#[derive(Deserialize)]
+struct RoReq {
+    /// Nouveau mot de passe de l'accès en lecture seule ; vide = supprimer cet accès.
+    password: String,
+}
+
+async fn set_readonly(State(app): State<Arc<App>>, Extension(actor): Extension<Actor>, Json(r): Json<RoReq>) -> Res {
+    if r.password.is_empty() {
+        app.node.lock().ro_pw = None;
+    } else {
+        if r.password.chars().count() < 8 {
+            return Err(bad("le mot de passe de lecture seule doit contenir au moins 8 caractères"));
+        }
+        let pw = r.password.clone();
+        let h = tokio::task::spawn_blocking(move || auth::hash_pw(&pw)).await.map_err(|e| bad(e.to_string()))?;
+        app.node.lock().ro_pw = Some(h);
+    }
+    app.save_node();
+    app.auth.revoke_ro();
+    let what = if r.password.is_empty() { "accès en lecture seule supprimé" } else { "mot de passe de lecture seule défini" };
+    app.auth.event("", "readonly", &format!("{what} par {}", actor.0));
+    Ok(Json(json!({"ok": true})))
+}
+
 async fn auth_events(State(app): State<Arc<App>>, headers: HeaderMap) -> Res {
     let cur = session_token(&headers);
     Ok(Json(json!({
+        "readonly_enabled": app.node.lock().ro_pw.is_some(),
         "events": app.auth.events(),
         "locked": app.auth.locked_list().into_iter().map(|(ip, s)| json!({"ip": ip, "seconds": s})).collect::<Vec<_>>(),
         "sessions": app.auth.sessions(cur.as_deref()),
@@ -698,7 +749,7 @@ async fn upstream_status(State(app): State<Arc<App>>) -> Res {
 }
 
 async fn run_probe(app: &Arc<App>, id: &str, cfg: &UpstreamCfg) -> Res {
-    let u = upstream::Upstream::new(id, &cfg.name, &cfg.address, &cfg.bootstrap, cfg.domains.clone())
+    let u = upstream::Upstream::new(id, &cfg.name, &cfg.address, &cfg.bootstrap, cfg.domains.clone(), cfg.backup)
         .map_err(|e| bad(e.to_string()))?;
     let health = if id == "tmp" { Default::default() } else { app.health.clone() };
     match upstream::probe(&u, &health).await {
@@ -751,14 +802,14 @@ async fn lists_refresh_all(State(app): State<Arc<App>>) -> Res {
 // ---------- test d'un domaine ----------
 
 #[derive(Deserialize)]
-struct CheckReq {
-    domain: String,
-    client: Option<String>,
+pub struct CheckReq {
+    pub domain: String,
+    pub client: Option<String>,
     #[serde(rename = "type")]
-    qtype: Option<String>,
+    pub qtype: Option<String>,
 }
 
-async fn check(State(app): State<Arc<App>>, Json(r): Json<CheckReq>) -> Res {
+pub async fn check(State(app): State<Arc<App>>, Json(r): Json<CheckReq>) -> Res {
     let name = model::norm_domain(&r.domain);
     if name.is_empty() {
         return Err(bad("domaine vide"));

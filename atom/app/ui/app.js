@@ -98,7 +98,9 @@ pages.dashboard = async function (token) {
       return list.length ? `<div class="rank ${cls}">${list.map(([n, c]) => `<div><span title="${esc(n)}">${esc(n)}</span><span class="mono">${num(c)}</span><u style="width:${c / m * 100}%"></u></div>`).join('')}</div>` : '<div class="empty">Aucune donnée</div>';
     };
     const nodes = Object.entries(st.per_node).map(([id, c]) => `<tr><td>${esc(st.node_names[id] || id)}</td><td>${num(c)}</td></tr>`).join('');
-    $('#dbody').innerHTML = `${info.dns_error || !info.dns_ok ? `<div class="card" style="border-color:var(--bad);margin-bottom:14px"><b style="color:var(--bad)">Le serveur DNS de ce nœud n'écoute pas.</b> ${info.dns_error ? `<span class="mono">${esc(info.dns_error)}</span>` : ''}<p class="muted" style="margin-top:6px">Aucun appareil ne peut l'interroger. Le plus souvent, le port 53 est déjà utilisé (systemd-resolved, dnsmasq, un autre serveur DNS) ou demande des droits supplémentaires. Voir le README, section « Installation ».</p></div>` : ''}
+    let hp = [];
+    try { hp = (await get('health')).problems; } catch { /* ignoré */ }
+    $('#dbody').innerHTML = `${hp.length ? `<a class="card hbanner ${hp.some(p => p.level === 'bad') ? 'bad' : 'warn'}" href="#health"><b>${hp.length} problème${hp.length > 1 ? 's' : ''} détecté${hp.length > 1 ? 's' : ''}</b> : ${esc(hp[0].scope)} · ${esc(hp[0].text)}${hp.length > 1 ? ` <span class="muted">et ${hp.length - 1} autre(s)</span>` : ''}</a>` : ''}${info.dns_error || !info.dns_ok ? `<div class="card" style="border-color:var(--bad);margin-bottom:14px"><b style="color:var(--bad)">Le serveur DNS de ce nœud n'écoute pas.</b> ${info.dns_error ? `<span class="mono">${esc(info.dns_error)}</span>` : ''}<p class="muted" style="margin-top:6px">Aucun appareil ne peut l'interroger. Le plus souvent, le port 53 est déjà utilisé (systemd-resolved, dnsmasq, un autre serveur DNS) ou demande des droits supplémentaires. Voir le README, section « Installation ».</p></div>` : ''}
       <div class="tiles">
         <div class="tile"><small>Requêtes</small><strong>${num(st.total)}</strong></div>
         <div class="tile"><small>Bloquées</small><strong>${pct.toFixed(1).replace('.', ',')} %</strong><span>${num(st.blocked)} requêtes</span></div>
@@ -145,7 +147,9 @@ pages.log = async function (token) {
       <div class="row" style="align-self:end"><button class="btn" id="reset">Réinitialiser</button></div>
     </div>
     <div class="row sp" style="margin:12px 0 8px"><span class="muted" id="cnt"></span><span class="row" id="chips"></span></div>
-    <div class="tblwrap"><table><thead><tr><th>Heure</th><th>Domaine</th><th>Type</th><th>Client</th><th>Nœud</th><th>Résultat</th><th>Détail</th><th>Durée</th><th></th></tr></thead><tbody id="lb"></tbody></table></div></div>`;
+    <div class="tblwrap" id="logw"><table id="logt"><thead><tr><th>Heure</th><th>Domaine</th><th>Type</th><th>Client</th><th>Nœud</th><th>Résultat</th><th>Détail</th><th>Durée</th><th></th></tr></thead><tbody id="lb"></tbody></table></div></div>
+    <div id="why"></div>`;
+  let shown = [];
   let names = {};
   const stamp = ms => new Date(ms).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const csIds = () => {
@@ -191,15 +195,32 @@ pages.log = async function (token) {
     if ($('#ty').value) active.push('type ' + $('#ty').value);
     if ($('#pe').value !== '0') active.push($('#pe').selectedOptions[0].text.toLowerCase());
     $('#chips').innerHTML = active.map(a => `<span class="tag acc">${esc(a)}</span>`).join('');
-    $('#lb').innerHTML = rows.length ? rows.map(r => `<tr>
+    shown = rows;
+    $('#lb').innerHTML = rows.length ? rows.map((r, i) => `<tr>
       <td class="mono" title="${esc(new Date(r.ts).toLocaleString('fr-FR'))}">${stamp(r.ts)}</td><td class="mono" title="${esc(r.name)}">${esc(r.name)}</td><td>${esc(r.qtype)}</td>
       <td class="mono"><a href="#" class="plain" data-fcl="${esc(r.client)}" title="Filtrer sur cette adresse">${esc(r.client)}</a>${cname(r.client) ? ` <b style="font-family:var(--sans)">${esc(cname(r.client))}</b>` : ''}</td>
       <td>${esc(names[r.node] || r.node)}</td><td>${resTag(r.result, r.cached)}</td>
       <td class="wrap muted mono">${r.ad ? '<span class="tag ok" title="Réponse validée par DNSSEC">DNSSEC</span> ' : ''}${esc(r.reason || r.list || r.upstream)}</td><td>${r.ms} ms</td>
-      <td>${r.result === 'blocked' ? `<button class="btn sm" data-allow="${esc(r.name)}">Autoriser</button>` : r.result === 'allowed' || r.result === 'error' ? `<button class="btn sm" data-block="${esc(r.name)}">Bloquer</button>` : ''}</td></tr>`).join('')
+      <td class="row" style="flex-wrap:nowrap"><button class="btn sm" data-why="${i}">Pourquoi ?</button>${r.result === 'blocked' ? `<button class="btn sm" data-w data-allow="${esc(r.name)}">Autoriser</button>` : r.result === 'allowed' || r.result === 'error' ? `<button class="btn sm" data-w data-block="${esc(r.name)}">Bloquer</button>` : ''}</td></tr>`).join('')
       : '<tr><td colspan="9" class="empty">Aucune requête ne correspond à ces filtres</td></tr>';
   }
   main.onclick = guard(async e => {
+    const wy = e.target.closest('[data-why]');
+    if (wy) { await showWhy(shown[+wy.dataset.why], $('#why'), names); return; }
+    const tmp = e.target.closest('[data-tmp]');
+    if (tmp) {
+      const mins = +$('#tmpm').value;
+      await api('POST', 'tempallow', { domain: tmp.dataset.tmp, minutes: mins });
+      toast(`${tmp.dataset.tmp} autorisé temporairement`); $('#why').innerHTML = ''; return;
+    }
+    const off = e.target.closest('[data-off]');
+    if (off) {
+      const rule = off.dataset.off;
+      const line = rule.includes('$') ? rule + ',badfilter' : rule + '$badfilter';
+      const cur = (await get('c/rules')).find(r => r.id === 'main');
+      await api('PUT', 'c/rules/main', { text: (((cur && cur.text) || '').replace(/\s*$/, '') + '\n' + line + '\n').replace(/^\n/, '') });
+      toast('Règle désactivée : ' + rule); $('#why').innerHTML = ''; return;
+    }
     const fc = e.target.closest('[data-fcl]');
     if (fc) { e.preventDefault(); $('#cl').value = fc.dataset.fcl; draw(); return; }
     if (e.target.id === 'reset') {
@@ -209,6 +230,7 @@ pages.log = async function (token) {
     }
     const t = e.target.closest('[data-allow],[data-block]');
     if (!t) return;
+    $('#why').innerHTML = '';
     const rule = t.dataset.allow ? `@@||${t.dataset.allow}^` : `||${t.dataset.block}^`;
     const cur = (await get('c/rules')).find(r => r.id === 'main');
     const text = ((cur && cur.text) || '').replace(/\s*$/, '') + '\n' + rule + '\n';
@@ -327,6 +349,7 @@ pages.dns = async function (token) {
         <label class="lbl">Adresse<input class="f" id="ua" placeholder="1.1.1.1 · tls://dns.quad9.net · https://dns.google/dns-query"></label>
         <label class="lbl">Bootstrap (IP du serveur DoH/DoT, évite de dépendre d'un autre DNS)<input class="f" id="ub" placeholder="optionnel"></label>
         <label class="lbl">Domaines dédiés (séparés par des virgules, vide = tous)<input class="f" id="ud" placeholder="lan, maison.lan"></label>
+        <label class="row" style="gap:8px"><input type="checkbox" id="ubk"> <span>Upstream de secours : interrogé seulement si les autres n'ont pas répondu (par exemple la box)</span></label>
         <div class="row"><button class="btn pri" id="usave">Ajouter</button><button class="btn" id="utest">Tester</button><button class="btn" id="ucancel" hidden>Annuler</button><span id="ures" class="muted"></span></div></div>
         <div class="note">Formats : <span class="mono">8.8.8.8</span> (UDP), <span class="mono">tcp://8.8.8.8</span>, <span class="mono">tls://dns.google</span> (DoT), <span class="mono">https://dns.google/dns-query</span> (DoH). Avec des domaines dédiés, l'upstream ne sert que pour ces domaines : utile pour envoyer <span class="mono">lan</span> vers ton routeur.</div></div></div>
     <div class="cols" style="margin-top:14px">
@@ -348,7 +371,7 @@ pages.dns = async function (token) {
     $$('#mode button').forEach(b => b.classList.toggle('on', b.dataset.m === set.upstream_mode));
     $('#modenote').textContent = set.upstream_mode === 'parallel'
       ? 'Toutes les requêtes partent vers tous les upstreams actifs en même temps, la première réponse valide gagne.'
-      : 'Chaque requête est envoyée au premier upstream disponible. Si celui-ci échoue ou est hors service, le suivant prend le relais.';
+      : 'Chaque requête est envoyée au premier upstream disponible. Si celui-ci échoue ou est hors service, le suivant prend le relais. Les upstreams de secours ne sont utilisés que si tous les autres ont échoué.';
     $('#ut').innerHTML = ups.length ? ups.map((u, i) => {
       const h = health[u.id] || {};
       const state = !u.enabled ? '<span class="dot"></span><span class="muted">désactivé</span>'
@@ -358,7 +381,7 @@ pages.dns = async function (token) {
       return `<tr draggable="true" data-id="${u.id}"><td class="handle" title="Glisser pour réordonner">⠿</td>
         <td><div class="row" style="flex-wrap:nowrap"><b>${i + 1}</b><button class="btn sm" data-up="${u.id}" ${i === 0 ? 'disabled' : ''} aria-label="Monter">▲</button><button class="btn sm" data-down="${u.id}" ${i === ups.length - 1 ? 'disabled' : ''} aria-label="Descendre">▼</button></div></td>
         <td>${sw(u.enabled, `data-tog="${u.id}"`)}</td><td>${state}</td>
-        <td>${esc(u.name)}${u.domains.length ? ` <span class="tag acc">${esc(u.domains.join(', '))}</span>` : ''}</td>
+        <td>${esc(u.name)}${u.domains.length ? ` <span class="tag acc">${esc(u.domains.join(', '))}</span>` : ''}${u.backup ? ' <span class="tag warn" title="Interrogé seulement si les autres upstreams échouent">secours</span>' : ''}</td>
         <td class="mono">${esc(u.address)}</td><td class="mono">${u.enabled && h.latency_ms != null && h.up ? h.latency_ms + ' ms' : '–'}</td>
         <td class="row" style="flex-wrap:nowrap"><button class="btn sm" data-t="${u.id}">Tester</button><button class="btn sm" data-edit="${u.id}">Modifier</button><button class="btn sm danger" data-del="${u.id}">Supprimer</button></td></tr>`;
     }).join('') : '<tr><td colspan="8" class="empty">Aucun upstream : aucune requête ne pourra être résolue.</td></tr>';
@@ -368,9 +391,9 @@ pages.dns = async function (token) {
   }
   async function reorder(ids) { await api('POST', 'upstreams/reorder', { ids }); await load(); draw(); toast('Priorité mise à jour'); }
   function form() {
-    return { name: $('#un').value, address: $('#ua').value, bootstrap: $('#ub').value, domains: $('#ud').value.split(',').map(s => s.trim()).filter(Boolean) };
+    return { name: $('#un').value, address: $('#ua').value, bootstrap: $('#ub').value, domains: $('#ud').value.split(',').map(s => s.trim()).filter(Boolean), backup: $('#ubk').checked };
   }
-  function resetForm() { editing = null; ['un', 'ua', 'ub', 'ud'].forEach(i => ($('#' + i).value = '')); $('#usave').textContent = 'Ajouter'; $('#uh').textContent = 'Ajouter un upstream'; $('#ucancel').hidden = true; }
+  function resetForm() { editing = null; $('#ubk').checked = false; ['un', 'ua', 'ub', 'ud'].forEach(i => ($('#' + i).value = '')); $('#usave').textContent = 'Ajouter'; $('#uh').textContent = 'Ajouter un upstream'; $('#ucancel').hidden = true; }
   $('#ucancel').onclick = resetForm;
   $('#utest').onclick = guard(async () => {
     $('#ures').textContent = 'Test en cours…';
@@ -404,7 +427,7 @@ pages.dns = async function (token) {
       toast(r.ok ? `Répond en ${r.latency_ms} ms` : `Échec : ${r.error}`, !r.ok); await load(); draw();
     } else if (t.dataset.edit) {
       const u = ups.find(x => x.id === t.dataset.edit); editing = u.id;
-      $('#un').value = u.name; $('#ua').value = u.address; $('#ub').value = u.bootstrap; $('#ud').value = u.domains.join(', ');
+      $('#un').value = u.name; $('#ua').value = u.address; $('#ub').value = u.bootstrap; $('#ud').value = u.domains.join(', '); $('#ubk').checked = !!u.backup;
       $('#usave').textContent = 'Enregistrer'; $('#uh').textContent = 'Modifier un upstream'; $('#ucancel').hidden = false; $('#un').focus();
     } else if (t.dataset.del) {
       if (t.dataset.sure !== '1') { t.dataset.sure = '1'; t.textContent = 'Confirmer ?'; setTimeout(() => { t.dataset.sure = ''; t.textContent = 'Supprimer'; }, 3000); return; }
@@ -567,7 +590,7 @@ pages.security = async function (token) {
   const [me, ev, tk] = await Promise.all([get('auth/me'), get('auth/events'), get('tokens')]);
   if (token !== routeToken) return;
   const KIND = {
-    login_ok: ['Connexion réussie', 'ok'], login_fail: ['Échec de connexion', 'bad'], locked: ['Adresse bloquée', 'warn'],
+    login_ok: ['Connexion réussie', 'ok'], readonly: ['Accès lecture seule', 'acc'], login_fail: ['Échec de connexion', 'bad'], locked: ['Adresse bloquée', 'warn'],
     sync_fail: ['Échec côté cluster', 'warn'], unlock: ['Adresse débloquée', 'acc'], password_changed: ['Mot de passe modifié', 'acc'], logout: ['Déconnexion', ''],
   };
   const when = ms => new Date(ms).toLocaleString('fr-FR');
@@ -585,7 +608,7 @@ pages.security = async function (token) {
       </div>
       <div class="card"><h2>Sessions ouvertes <button class="btn sm" id="rev" ${ev.sessions.filter(s => !s.current).length ? '' : 'disabled'}>Déconnecter les autres</button></h2>
         <div class="tblwrap"><table><thead><tr><th>Adresse</th><th>Ouverte</th><th>Dernière activité</th><th></th></tr></thead><tbody>
-        ${ev.sessions.length ? ev.sessions.map(s => `<tr><td class="mono">${esc(s.ip)}</td><td>${when(s.created)}</td><td>${ago(s.last_seen)}</td><td>${s.current ? '<span class="tag acc">cette session</span>' : ''}</td></tr>`).join('') : `<tr><td colspan="4" class="empty">${me.ingress ? 'Accès via Home Assistant, sans session propre' : 'Aucune session'}</td></tr>`}
+        ${ev.sessions.length ? ev.sessions.map(s => `<tr><td class="mono">${esc(s.ip)}</td><td>${when(s.created)}</td><td>${ago(s.last_seen)}</td><td>${s.current ? '<span class="tag acc">cette session</span>' : ''}${s.ro ? ' <span class="tag">lecture seule</span>' : ''}</td></tr>`).join('') : `<tr><td colspan="4" class="empty">${me.ingress ? 'Accès via Home Assistant, sans session propre' : 'Aucune session'}</td></tr>`}
         </tbody></table></div>
         ${ev.locked.length ? `<h2 style="margin-top:16px">Adresses bloquées <button class="btn sm" data-unlock="">Tout débloquer</button></h2><div class="tblwrap"><table><tbody>${ev.locked.map(l => `<tr><td class="mono">${esc(l.ip)}</td><td>encore ${l.seconds} s</td><td><button class="btn sm" data-unlock="${esc(l.ip)}">Débloquer</button></td></tr>`).join('')}</tbody></table></div>` : ''}
       </div>

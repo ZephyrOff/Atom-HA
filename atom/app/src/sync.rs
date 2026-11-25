@@ -33,6 +33,17 @@ pub struct PullResp {
     pub peers: Vec<Peer>,
     pub cfg: Vec<Obj>,
     pub logs: Vec<LogEntry>,
+    #[serde(default)]
+    pub version: String,
+    /// Heure du nœud au moment de la réponse (ms).
+    #[serde(default)]
+    pub time: u64,
+    #[serde(default)]
+    pub cert_expires: Option<u64>,
+    #[serde(default)]
+    pub dns_ok: Option<bool>,
+    #[serde(default)]
+    pub cfg_vv: HashMap<String, u64>,
 }
 
 const LOG_BATCH: usize = 5000;
@@ -40,6 +51,7 @@ const LOG_BATCH: usize = 5000;
 async fn pull_from(app: &Arc<App>, peer_id: &str, url: &str, token: &str) -> anyhow::Result<(usize, usize)> {
     let req = PullReq { node_id: app.node_id(), cfg_vv: app.store.vv(), log_vv: app.qlog.vv() };
     let t = Instant::now();
+    let t0 = now_ms();
     let resp = app
         .sync_client
         .load_full()
@@ -88,14 +100,22 @@ async fn pull_from(app: &Arc<App>, peer_id: &str, url: &str, token: &str) -> any
     if nl > 0 {
         app.qlog.apply_remote(r.logs);
     }
+    let latency = t.elapsed().as_millis() as u64;
+    let mine = app.store.vv();
+    let behind: u64 = mine.iter().map(|(o, n)| n.saturating_sub(r.cfg_vv.get(o).copied().unwrap_or(0))).sum();
     let mut ps = app.peer_status.lock();
     let e = ps.entry(peer_id.to_string()).or_default();
     *e = PeerStatus {
         ok: true,
         last_ok: now_ms(),
         last_error: None,
-        latency_ms: t.elapsed().as_millis() as u64,
+        latency_ms: latency,
         name: r.node_name,
+        version: r.version,
+        skew_ms: if r.time > 0 { r.time as i64 - (t0 + latency / 2) as i64 } else { 0 },
+        cert_expires: r.cert_expires,
+        dns_ok: r.dns_ok,
+        behind_ops: behind,
     };
     Ok((nc, nl))
 }
@@ -115,6 +135,11 @@ pub fn answer_pull(app: &Arc<App>, req: PullReq) -> PullResp {
         peers,
         cfg: app.store.pull(&req.cfg_vv),
         logs: app.qlog.pull(&req.log_vv, LOG_BATCH),
+        version: crate::state::VERSION.to_string(),
+        time: now_ms(),
+        cert_expires: crate::tls::own_cert_expiry(app),
+        dns_ok: Some(app.dns_ok.load(std::sync::atomic::Ordering::Relaxed)),
+        cfg_vv: app.store.vv(),
     }
 }
 

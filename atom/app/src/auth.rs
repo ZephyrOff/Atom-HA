@@ -61,11 +61,18 @@ fn legacy_hash(salt: &str, pw: &str) -> String {
 }
 
 /// Vérifie un mot de passe. Retourne aussi `true` pour un ancien hash SHA-256 (migré ensuite).
+pub fn verify_hash(h: &PwHash, pw: &str) -> bool {
+    derive(pw, h.salt.as_bytes(), h.m, h.t, h.p).map(|d| ct_eq(&hex::encode(d), &h.hash)).unwrap_or(false)
+}
+
+/// Vérifie le mot de passe du second accès (lecture seule), s'il existe.
+pub fn verify_ro(n: &NodeFile, pw: &str) -> bool {
+    n.ro_pw.as_ref().map_or(false, |h| verify_hash(h, pw))
+}
+
 pub fn verify_pw(n: &NodeFile, pw: &str) -> bool {
     if let Some(h) = &n.pw {
-        return derive(pw, h.salt.as_bytes(), h.m, h.t, h.p)
-            .map(|d| ct_eq(&hex::encode(d), &h.hash))
-            .unwrap_or(false);
+        return verify_hash(h, pw);
     }
     // Calcul factice pour garder un temps de réponse comparable.
     let _ = derive(pw, b"atom-dummy-salt-0", ARGON_M, ARGON_T, ARGON_P);
@@ -87,6 +94,8 @@ struct Session {
     created: u64,
     last_seen: u64,
     ip: String,
+    /// Session en lecture seule.
+    ro: bool,
 }
 
 struct IpState {
@@ -101,6 +110,7 @@ pub struct SessionInfo {
     pub created: u64,
     pub last_seen: u64,
     pub current: bool,
+    pub ro: bool,
 }
 
 #[derive(Default)]
@@ -204,7 +214,7 @@ impl Auth {
 
     // --- sessions ---
 
-    pub fn create_session(&self, ip: &str) -> String {
+    pub fn create_session(&self, ip: &str, ro: bool) -> String {
         let token = random_hex(32);
         let now = now_ms();
         let mut g = self.sessions.lock();
@@ -213,7 +223,7 @@ impl Auth {
             let Some(oldest) = g.iter().min_by_key(|(_, s)| s.last_seen).map(|(k, _)| k.clone()) else { break };
             g.remove(&oldest);
         }
-        g.insert(token_hash(&token), Session { created: now, last_seen: now, ip: ip.into() });
+        g.insert(token_hash(&token), Session { created: now, last_seen: now, ip: ip.into(), ro });
         token
     }
 
@@ -234,6 +244,16 @@ impl Auth {
         }
     }
 
+    /// La session est-elle en lecture seule ?
+    pub fn is_ro(&self, token: &str) -> bool {
+        self.sessions.lock().get(&token_hash(token)).map_or(false, |s| s.ro)
+    }
+
+    /// Ferme toutes les sessions en lecture seule (mot de passe changé ou retiré).
+    pub fn revoke_ro(&self) {
+        self.sessions.lock().retain(|_, s| !s.ro);
+    }
+
     pub fn revoke(&self, token: &str) {
         self.sessions.lock().remove(&token_hash(token));
     }
@@ -250,7 +270,7 @@ impl Auth {
             .sessions
             .lock()
             .iter()
-            .map(|(k, s)| SessionInfo { ip: s.ip.clone(), created: s.created, last_seen: s.last_seen, current: Some(k) == cur.as_ref() })
+            .map(|(k, s)| SessionInfo { ip: s.ip.clone(), created: s.created, last_seen: s.last_seen, current: Some(k) == cur.as_ref(), ro: s.ro })
             .collect();
         v.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
         v
@@ -267,6 +287,17 @@ mod tests {
         n.pw = Some(hash_pw("correct horse"));
         assert!(verify_pw(&n, "correct horse"));
         assert!(!verify_pw(&n, "wrong"));
+    }
+
+    #[test]
+    fn readonly_password_is_separate() {
+        let mut n = NodeFile::default();
+        n.pw = Some(hash_pw("admin password"));
+        assert!(!verify_ro(&n, "lecture seule"));
+        n.ro_pw = Some(hash_pw("lecture seule"));
+        assert!(verify_ro(&n, "lecture seule"));
+        assert!(!verify_ro(&n, "admin password"));
+        assert!(!verify_pw(&n, "lecture seule"));
     }
 
     #[test]
@@ -299,10 +330,15 @@ mod tests {
     #[test]
     fn sessions_lifecycle() {
         let a = Auth::default();
-        let t = a.create_session("1.1.1.1");
+        let t = a.create_session("1.1.1.1", false);
         assert!(a.validate(&t));
+        assert!(!a.is_ro(&t));
         assert!(!a.validate("nope"));
         a.revoke(&t);
         assert!(!a.validate(&t));
+        let r = a.create_session("1.1.1.1", true);
+        assert!(a.is_ro(&r));
+        a.revoke_ro();
+        assert!(!a.validate(&r));
     }
 }

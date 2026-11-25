@@ -221,7 +221,10 @@ pub async fn resolve(app: &Arc<App>, req: &[u8], q: &Query, client: IpAddr) -> O
     let paused = eng.settings.pause_until.map_or(false, |t| t > now);
     let mut reason = String::new();
     let mut list = String::new();
-    if eng.settings.filtering_enabled && !paused {
+    if let Some(d) = eng.temp_allowed(&q.name, now).filter(|_| eng.settings.filtering_enabled && !paused) {
+        reason = format!("autorisation temporaire ({d})");
+        list = "Autorisation temporaire".into();
+    } else if eng.settings.filtering_enabled && !paused {
         let fctx = filter::Ctx { ip: client, client_name: eng.client_name(&ident), qtype: q.qtype };
         if let Some(hit) = filter::check(&eng.lists, &q.name, &fctx, &eng.disabled) {
             match hit.kind {
