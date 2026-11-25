@@ -1,0 +1,524 @@
+'use strict';
+// Interface web d'Atom. Chemins relatifs partout, pour fonctionner derrière l'ingress de Home Assistant.
+
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const main = $('#main');
+let timers = [];
+let routeToken = 0;
+
+async function api(method, path, body) {
+  const r = await fetch('api/' + path, {
+    method,
+    headers: body !== undefined ? { 'content-type': 'application/json' } : {},
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  let j = null;
+  try { j = await r.json(); } catch { /* corps vide */ }
+  if (!r.ok) throw new Error((j && j.error) || r.statusText);
+  return j;
+}
+const get = p => api('GET', p);
+
+let toastT;
+function toast(msg, err) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.className = 'show' + (err ? ' err' : '');
+  clearTimeout(toastT);
+  toastT = setTimeout(() => (t.className = ''), err ? 4500 : 2200);
+}
+const fail = e => toast(e.message || String(e), true);
+const guard = fn => async (...a) => { try { await fn(...a); } catch (e) { fail(e); } };
+
+function every(fn, ms) { timers.push(setInterval(() => { fn().catch(() => {}); }, ms)); }
+function ago(ms) {
+  if (!ms) return 'jamais';
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 5) return "à l'instant";
+  if (s < 60) return `il y a ${s} s`;
+  if (s < 3600) return `il y a ${Math.round(s / 60)} min`;
+  if (s < 86400) return `il y a ${Math.round(s / 3600)} h`;
+  return `il y a ${Math.round(s / 86400)} j`;
+}
+const clock = ms => new Date(ms).toLocaleTimeString('fr-FR');
+const num = n => Number(n).toLocaleString('fr-FR');
+function sw(checked, attrs = '') { return `<label class="sw"><input type="checkbox" ${checked ? 'checked' : ''} ${attrs}><i></i></label>`; }
+
+async function getSettings() { return (await get('c/settings')).find(s => s.id === 'main') || {}; }
+async function saveSettings(patch) {
+  const s = { ...(await getSettings()), ...patch };
+  delete s.id; delete s.updated_at;
+  await api('PUT', 'c/settings/main', s);
+}
+
+const RESULT = {
+  allowed: ['Autorisée', 'ok'], blocked: ['Bloquée', 'bad'], rewritten: ['Réécrite', 'acc'],
+  zone: ['Zone locale', 'acc'], error: ['Erreur', 'warn'],
+};
+const resTag = (r, cached) => {
+  const [t, c] = RESULT[r] || [r, ''];
+  return `<span class="tag ${c}">${t}${cached ? ' · cache' : ''}</span>`;
+};
+
+// ---------- pages ----------
+
+const pages = {};
+
+pages.dashboard = async function (token) {
+  main.innerHTML = `<div class="head"><div><h1>Tableau de bord</h1><p>Dernières 24 heures, tous les nœuds du cluster.</p></div>
+    <div class="row" id="dctl"></div></div><div id="dbody"></div>`;
+  async function draw() {
+    const [info, st, set, cl] = await Promise.all([get('info'), get('stats'), getSettings(), get('cluster')]);
+    if (token !== routeToken) return;
+    const pct = st.total ? (st.blocked / st.total * 100) : 0;
+    const paused = info.paused_until;
+    $('#dctl').innerHTML = paused
+      ? `<span class="tag warn">Filtrage en pause jusqu'à ${clock(paused)}</span><button class="btn" data-a="resume">Reprendre</button>`
+      : `<span class="muted">Pause :</span>${[5, 30, 60].map(m => `<button class="btn sm" data-pause="${m}">${m} min</button>`).join('')}
+         <span class="row" style="margin-left:8px">Filtrage ${sw(set.filtering_enabled, 'data-a="filtering"')}</span>`;
+    const max = Math.max(10, ...st.hours.map(h => h[0]));
+    const nice = (() => { const p = Math.pow(10, Math.floor(Math.log10(max))); return Math.ceil(max / p) * p; })();
+    const W = 720, H = 190, L = 40, B = 22, T = 8, ch = H - B - T, cw = W - L - 4, bw = cw / 24;
+    let svg = '';
+    for (let i = 0; i <= 4; i++) {
+      const v = nice / 4 * i, y = T + ch - v / nice * ch;
+      svg += `<line x1="${L}" x2="${W - 4}" y1="${y}" y2="${y}"/><text x="${L - 6}" y="${y + 3}" text-anchor="end">${v >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0) + 'k' : Math.round(v)}</text>`;
+    }
+    const nowH = new Date().getHours();
+    st.hours.forEach((h, i) => {
+      const ok = h[0] - h[1], x = L + i * bw + 2, w = bw - 4, hg = ok / nice * ch, hb = h[1] / nice * ch;
+      svg += `<rect x="${x}" y="${T + ch - hg - hb}" width="${w}" height="${hg}" fill="var(--accent)"/><rect x="${x}" y="${T + ch - hb}" width="${w}" height="${hb}" fill="var(--bad)"/>`;
+      if (i % 4 === 3) svg += `<text x="${x + w / 2}" y="${H - 6}" text-anchor="middle">${String((nowH - (23 - i) + 24) % 24).padStart(2, '0')}h</text>`;
+    });
+    const rank = (list, cls) => {
+      const m = Math.max(1, ...list.map(x => x[1]));
+      return list.length ? `<div class="rank ${cls}">${list.map(([n, c]) => `<div><span title="${esc(n)}">${esc(n)}</span><span class="mono">${num(c)}</span><u style="width:${c / m * 100}%"></u></div>`).join('')}</div>` : '<div class="empty">Aucune donnée</div>';
+    };
+    const nodes = Object.entries(st.per_node).map(([id, c]) => `<tr><td>${esc(st.node_names[id] || id)}</td><td>${num(c)}</td></tr>`).join('');
+    $('#dbody').innerHTML = `
+      <div class="tiles">
+        <div class="tile"><small>Requêtes</small><strong>${num(st.total)}</strong></div>
+        <div class="tile"><small>Bloquées</small><strong>${pct.toFixed(1).replace('.', ',')} %</strong><span>${num(st.blocked)} requêtes</span></div>
+        <div class="tile"><small>Latence moyenne</small><strong>${Math.round(st.avg_ms)} ms</strong><span>hors cache</span></div>
+        <div class="tile"><small>Réponses du cache</small><strong>${st.total ? Math.round(st.cached / st.total * 100) : 0} %</strong><span>${num(st.cached)} requêtes</span></div>
+        <div class="tile"><small>Règles chargées</small><strong>${num(info.rules_loaded)}</strong><span>${cl.peers.length + 1} nœud(s)</span></div>
+      </div>
+      <div class="card"><h2>Requêtes par heure <span class="row muted" style="font-weight:400;font-size:12px"><span><span class="dot" style="background:var(--accent)"></span>autorisées</span><span><span class="dot" style="background:var(--bad)"></span>bloquées</span></span></h2>
+        <svg class="bars" viewBox="0 0 ${W} ${H}" role="img" aria-label="Requêtes par heure" style="width:100%;height:auto">${svg}</svg></div>
+      <div class="cols" style="margin-top:14px">
+        <div class="card"><h2>Domaines les plus demandés</h2>${rank(st.top_domains, '')}</div>
+        <div class="card"><h2>Domaines les plus bloqués</h2>${rank(st.top_blocked, 'bl')}</div>
+        <div class="card"><h2>Clients les plus actifs</h2>${rank(st.top_clients, '')}</div>
+        <div class="card"><h2>Requêtes par nœud</h2>${nodes ? `<div class="tblwrap"><table><tbody>${nodes}</tbody></table></div>` : '<div class="empty">Aucune donnée</div>'}</div>
+      </div>`;
+  }
+  main.onclick = guard(async e => {
+    const t = e.target.closest('[data-pause],[data-a="resume"]');
+    if (!t) return;
+    await api('POST', 'pause', { minutes: t.dataset.pause ? +t.dataset.pause : 0 });
+    toast(t.dataset.pause ? 'Filtrage en pause' : 'Filtrage repris');
+    draw();
+  });
+  main.onchange = guard(async e => {
+    if (e.target.dataset.a === 'filtering') { await saveSettings({ filtering_enabled: e.target.checked }); toast(e.target.checked ? 'Filtrage activé' : 'Filtrage désactivé'); }
+  });
+  await draw();
+  every(draw, 5000);
+};
+
+pages.log = async function (token) {
+  main.innerHTML = `<div class="head"><div><h1>Journal des requêtes</h1><p>Répliqué entre les nœuds. Les entrées les plus récentes sont en haut.</p></div></div>
+    <div class="card"><div class="row" style="margin-bottom:12px">
+      <input class="f grow" id="q" placeholder="Rechercher un domaine, un client, une règle" aria-label="Rechercher">
+      <select class="f" id="st" style="width:auto" aria-label="Résultat"><option value="">Tous les résultats</option><option value="blocked">Bloquées</option><option value="allowed">Autorisées</option><option value="rewritten">Réécrites</option><option value="zone">Zone locale</option><option value="error">Erreurs</option></select>
+      <select class="f" id="nd" style="width:auto" aria-label="Nœud"><option value="">Tous les nœuds</option></select>
+    </div><div class="tblwrap"><table><thead><tr><th>Heure</th><th>Domaine</th><th>Type</th><th>Client</th><th>Nœud</th><th>Résultat</th><th>Détail</th><th>Durée</th><th></th></tr></thead><tbody id="lb"></tbody></table></div></div>`;
+  let names = {};
+  async function draw() {
+    const p = new URLSearchParams({ limit: 200, search: $('#q').value, status: $('#st').value, node: $('#nd').value });
+    const [rows, st] = await Promise.all([get('log?' + p), get('stats')]);
+    if (token !== routeToken) return;
+    names = st.node_names;
+    const nd = $('#nd');
+    if (nd.options.length <= 1) Object.entries(names).forEach(([id, n]) => nd.add(new Option(n, id)));
+    $('#lb').innerHTML = rows.length ? rows.map(r => `<tr>
+      <td class="mono">${clock(r.ts)}</td><td class="mono" title="${esc(r.name)}">${esc(r.name)}</td><td>${esc(r.qtype)}</td><td class="mono">${esc(r.client)}</td>
+      <td>${esc(names[r.node] || r.node)}</td><td>${resTag(r.result, r.cached)}</td>
+      <td class="wrap muted mono">${esc(r.reason || r.list || r.upstream)}</td><td>${r.ms} ms</td>
+      <td>${r.result === 'blocked' ? `<button class="btn sm" data-allow="${esc(r.name)}">Autoriser</button>` : r.result === 'allowed' || r.result === 'error' ? `<button class="btn sm" data-block="${esc(r.name)}">Bloquer</button>` : ''}</td></tr>`).join('')
+      : '<tr><td colspan="9" class="empty">Aucune requête</td></tr>';
+  }
+  main.onclick = guard(async e => {
+    const t = e.target.closest('[data-allow],[data-block]');
+    if (!t) return;
+    const rule = t.dataset.allow ? `@@||${t.dataset.allow}^` : `||${t.dataset.block}^`;
+    const cur = (await get('c/rules')).find(r => r.id === 'main');
+    const text = ((cur && cur.text) || '').replace(/\s*$/, '') + '\n' + rule + '\n';
+    await api('PUT', 'c/rules/main', { text: text.replace(/^\n/, '') });
+    toast('Règle ajoutée : ' + rule);
+  });
+  let deb;
+  main.oninput = () => { clearTimeout(deb); deb = setTimeout(() => draw().catch(fail), 250); };
+  main.onchange = () => draw().catch(fail);
+  await draw();
+  every(async () => { if (document.activeElement.id !== 'q') await draw(); }, 3000);
+};
+
+pages.filters = async function (token) {
+  main.innerHTML = `<div class="head"><div><h1>Filtres</h1><p>Listes synchronisées (syntaxe AdGuard, hosts ou liste de domaines) et listes locales. Chaque nœud télécharge ses listes lui-même.</p></div>
+    <button class="btn" id="refall">Tout synchroniser</button></div>
+    <div class="card"><h2>Listes</h2><div class="tblwrap"><table><thead><tr><th>Actif</th><th>Nom</th><th>Source</th><th>Règles</th><th>Synchro</th><th>État</th><th></th></tr></thead><tbody id="lt"></tbody></table></div></div>
+    <div class="card"><h2>Ajouter une liste</h2>
+      <div class="row" style="margin-bottom:12px"><div class="seg" id="kind"><button class="on" data-k="url">Depuis une URL</button><button data-k="inline">Texte ou fichier</button></div></div>
+      <div class="cols">
+        <div class="stack"><label class="lbl">Nom<input class="f" id="ln" placeholder="Ma liste"></label>
+          <div id="fu"><label class="lbl">URL<input class="f" id="lu" placeholder="https://exemple.org/liste.txt"></label>
+          <label class="lbl" style="margin-top:10px">Synchronisation<select class="f" id="li"><option value="1">Toutes les heures</option><option value="6">Toutes les 6 heures</option><option value="12" selected>Toutes les 12 heures</option><option value="24">Tous les jours</option><option value="168">Toutes les semaines</option></select></label></div>
+          <div id="fi" hidden><label class="lbl">Règles<textarea class="f" id="lc" style="min-height:160px" placeholder="||tracker.exemple.com^&#10;0.0.0.0 pub.exemple.net"></textarea></label>
+          <div class="row" style="margin-top:8px"><input type="file" id="lf" accept=".txt,.list,text/plain"><span class="muted">Le contenu du fichier est lu ici, puis enregistré dans la configuration.</span></div></div>
+          <div class="row"><button class="btn pri" id="ladd">Ajouter</button></div></div>
+        <div class="note">Une liste enregistrée comme texte ou fichier est répliquée sur tous les nœuds. Une liste distante n'enregistre que son adresse : si le téléchargement échoue, la dernière copie valide reste active.</div>
+      </div></div>`;
+  let kind = 'url';
+  async function draw() {
+    const [lists, meta] = await Promise.all([get('c/lists'), get('lists/status')]);
+    if (token !== routeToken) return;
+    $('#lt').innerHTML = lists.length ? lists.map(l => {
+      const m = meta[l.id] || {};
+      const st = l.kind === 'inline' ? '<span class="tag ok">locale</span>'
+        : !l.enabled ? '<span class="tag">désactivée</span>'
+        : m.error ? `<span class="tag warn" title="${esc(m.error)}">échec${m.updated_at ? ' · ancienne copie' : ''}</span>`
+        : m.updated_at ? '<span class="tag ok">à jour</span>' : '<span class="tag">en attente</span>';
+      const count = l.kind === 'inline' ? '' : (m.rules ? num(m.rules) : '–');
+      return `<tr><td>${sw(l.enabled, `data-tog="${l.id}"`)}</td><td>${esc(l.name)}</td>
+        <td class="mono muted" title="${esc(l.url)}">${l.kind === 'url' ? esc(l.url.replace(/^https?:\/\//, '').slice(0, 44)) : 'texte local'}</td>
+        <td>${count}${m.unsupported ? ` <span class="muted" title="Règles ignorées : modificateurs non gérés">(${num(m.unsupported)} ignorées)</span>` : ''}</td>
+        <td>${l.kind === 'url' ? ago(m.updated_at) : ago(l.updated_at)}</td><td>${st}</td>
+        <td class="row">${l.kind === 'url' ? `<button class="btn sm" data-ref="${l.id}">Synchroniser</button>` : ''}<button class="btn sm danger" data-del="${l.id}">Supprimer</button></td></tr>`;
+    }).join('') : '<tr><td colspan="7" class="empty">Aucune liste</td></tr>';
+  }
+  $('#kind').onclick = e => {
+    const b = e.target.closest('button'); if (!b) return;
+    kind = b.dataset.k;
+    $$('#kind button').forEach(x => x.classList.toggle('on', x === b));
+    $('#fu').hidden = kind !== 'url'; $('#fi').hidden = kind !== 'inline';
+  };
+  $('#lf').onchange = e => { const f = e.target.files[0]; if (f) { f.text().then(t => { $('#lc').value = t; if (!$('#ln').value) $('#ln').value = f.name; }); } };
+  $('#ladd').onclick = guard(async () => {
+    const body = { name: $('#ln').value, kind, enabled: true };
+    if (kind === 'url') { body.url = $('#lu').value.trim(); body.interval_hours = +$('#li').value; } else body.content = $('#lc').value;
+    await api('POST', 'c/lists', body);
+    toast('Liste ajoutée');
+    ['ln', 'lu', 'lc'].forEach(i => ($('#' + i).value = ''));
+    draw();
+  });
+  $('#refall').onclick = guard(async () => { toast('Synchronisation en cours…'); const r = await api('POST', 'lists/refresh'); r.ok ? toast('Listes synchronisées') : toast(r.errors.join(' · '), true); draw(); });
+  main.onclick = guard(async e => {
+    const t = e.target.closest('[data-ref],[data-del]');
+    if (!t) return;
+    if (t.dataset.ref) { t.disabled = true; const r = await api('POST', `lists/${t.dataset.ref}/refresh`); r.ok ? toast('Liste synchronisée') : toast(r.error, true); draw(); }
+    else if (t.dataset.del) {
+      if (t.dataset.sure !== '1') { t.dataset.sure = '1'; t.textContent = 'Confirmer ?'; setTimeout(() => { t.dataset.sure = ''; t.textContent = 'Supprimer'; }, 3000); return; }
+      await api('DELETE', `c/lists/${t.dataset.del}`); draw();
+    }
+  });
+  main.onchange = guard(async e => {
+    const id = e.target.dataset.tog; if (!id) return;
+    const l = (await get('c/lists')).find(x => x.id === id);
+    delete l.id; delete l.updated_at; l.enabled = e.target.checked;
+    await api('PUT', `c/lists/${id}`, l); draw();
+  });
+  await draw();
+  every(draw, 5000);
+};
+
+pages.dns = async function (token) {
+  main.innerHTML = `<div class="head"><div><h1>Paramètres DNS</h1><p>Les upstreams sont essayés dans l'ordre de la liste. Glisse une ligne ou utilise les flèches pour changer la priorité.</p></div></div>
+    <div class="card"><h2>Upstreams <span class="row"><div class="seg" id="mode"><button data-m="ordered">Par priorité</button><button data-m="parallel">En parallèle</button></div></span></h2>
+      <div class="tblwrap"><table><thead><tr><th></th><th>Priorité</th><th>Actif</th><th>État</th><th>Nom</th><th>Adresse</th><th>Latence</th><th></th></tr></thead><tbody id="ut"></tbody></table></div>
+      <p class="note" style="margin-top:12px" id="modenote"></p></div>
+    <div class="card"><h2 id="uh">Ajouter un upstream</h2>
+      <div class="cols"><div class="stack">
+        <label class="lbl">Nom<input class="f" id="un" placeholder="Mon résolveur"></label>
+        <label class="lbl">Adresse<input class="f" id="ua" placeholder="1.1.1.1 · tls://dns.quad9.net · https://dns.google/dns-query"></label>
+        <label class="lbl">Bootstrap (IP du serveur DoH/DoT, évite de dépendre d'un autre DNS)<input class="f" id="ub" placeholder="optionnel"></label>
+        <label class="lbl">Domaines dédiés (séparés par des virgules, vide = tous)<input class="f" id="ud" placeholder="lan, maison.lan"></label>
+        <div class="row"><button class="btn pri" id="usave">Ajouter</button><button class="btn" id="utest">Tester</button><button class="btn" id="ucancel" hidden>Annuler</button><span id="ures" class="muted"></span></div></div>
+        <div class="note">Formats : <span class="mono">8.8.8.8</span> (UDP), <span class="mono">tcp://8.8.8.8</span>, <span class="mono">tls://dns.google</span> (DoT), <span class="mono">https://dns.google/dns-query</span> (DoH). Avec des domaines dédiés, l'upstream ne sert que pour ces domaines : utile pour envoyer <span class="mono">lan</span> vers ton routeur.</div></div></div>
+    <div class="cols" style="margin-top:14px">
+      <div class="card"><h2>Blocage</h2><label class="lbl">Réponse pour un domaine bloqué<select class="f" id="bm"><option value="null_ip">Adresse nulle (0.0.0.0)</option><option value="nxdomain">NXDOMAIN</option><option value="refused">REFUSED</option></select></label></div>
+      <div class="card"><h2>Cache <span class="row"><button class="btn sm" id="flush">Vider</button></span></h2>
+        <div class="row">${sw(true, 'id="ce"')}<span>Cache activé</span></div>
+        <label class="lbl" style="margin-top:10px">Taille maximale (entrées)<input class="f" id="cs" type="number" min="100"></label>
+        <label class="lbl" style="margin-top:10px">Délai d'attente par upstream (ms)<input class="f" id="ct" type="number" min="200" step="100"></label>
+        <div class="row" style="margin-top:12px"><button class="btn pri" id="csave">Enregistrer</button></div></div></div>`;
+  let ups = [], health = {}, editing = null, set = {};
+  async function load() {
+    [ups, health, set] = await Promise.all([get('c/upstreams'), get('upstreams/status'), getSettings()]);
+    ups.sort((a, b) => a.order - b.order);
+  }
+  function draw() {
+    if (token !== routeToken) return;
+    $$('#mode button').forEach(b => b.classList.toggle('on', b.dataset.m === set.upstream_mode));
+    $('#modenote').textContent = set.upstream_mode === 'parallel'
+      ? 'Toutes les requêtes partent vers tous les upstreams actifs en même temps, la première réponse valide gagne.'
+      : 'Chaque requête est envoyée au premier upstream disponible. Si celui-ci échoue ou est hors service, le suivant prend le relais.';
+    $('#ut').innerHTML = ups.length ? ups.map((u, i) => {
+      const h = health[u.id] || {};
+      const state = !u.enabled ? '<span class="dot"></span><span class="muted">désactivé</span>'
+        : h.up === true ? '<span class="dot up"></span>en ligne'
+        : h.up === false ? `<span class="dot down"></span><span title="${esc(h.last_error || '')}">hors service</span>`
+        : '<span class="dot"></span><span class="muted">inconnu</span>';
+      return `<tr draggable="true" data-id="${u.id}"><td class="handle" title="Glisser pour réordonner">⠿</td>
+        <td><div class="row" style="flex-wrap:nowrap"><b>${i + 1}</b><button class="btn sm" data-up="${u.id}" ${i === 0 ? 'disabled' : ''} aria-label="Monter">▲</button><button class="btn sm" data-down="${u.id}" ${i === ups.length - 1 ? 'disabled' : ''} aria-label="Descendre">▼</button></div></td>
+        <td>${sw(u.enabled, `data-tog="${u.id}"`)}</td><td>${state}</td>
+        <td>${esc(u.name)}${u.domains.length ? ` <span class="tag acc">${esc(u.domains.join(', '))}</span>` : ''}</td>
+        <td class="mono">${esc(u.address)}</td><td class="mono">${u.enabled && h.latency_ms != null && h.up ? h.latency_ms + ' ms' : '–'}</td>
+        <td class="row" style="flex-wrap:nowrap"><button class="btn sm" data-t="${u.id}">Tester</button><button class="btn sm" data-edit="${u.id}">Modifier</button><button class="btn sm danger" data-del="${u.id}">Supprimer</button></td></tr>`;
+    }).join('') : '<tr><td colspan="8" class="empty">Aucun upstream : aucune requête ne pourra être résolue.</td></tr>';
+    if (document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'SELECT') {
+      $('#bm').value = set.block_mode; $('#ce').checked = set.cache_enabled; $('#cs').value = set.cache_size; $('#ct').value = set.timeout_ms;
+    }
+  }
+  async function reorder(ids) { await api('POST', 'upstreams/reorder', { ids }); await load(); draw(); toast('Priorité mise à jour'); }
+  function form() {
+    return { name: $('#un').value, address: $('#ua').value, bootstrap: $('#ub').value, domains: $('#ud').value.split(',').map(s => s.trim()).filter(Boolean) };
+  }
+  function resetForm() { editing = null; ['un', 'ua', 'ub', 'ud'].forEach(i => ($('#' + i).value = '')); $('#usave').textContent = 'Ajouter'; $('#uh').textContent = 'Ajouter un upstream'; $('#ucancel').hidden = true; }
+  $('#ucancel').onclick = resetForm;
+  $('#utest').onclick = guard(async () => {
+    $('#ures').textContent = 'Test en cours…';
+    const r = await api('POST', 'upstreams/test', { ...form(), enabled: true });
+    $('#ures').textContent = r.ok ? `Répond en ${r.latency_ms} ms` : `Échec : ${r.error}`;
+  });
+  $('#usave').onclick = guard(async () => {
+    const body = form();
+    if (editing) {
+      const u = ups.find(x => x.id === editing);
+      await api('PUT', `c/upstreams/${editing}`, { ...body, enabled: u.enabled, order: u.order });
+    } else {
+      await api('POST', 'c/upstreams', { ...body, enabled: true, order: (ups.length ? Math.max(...ups.map(u => u.order)) : 0) + 1 });
+    }
+    toast('Upstream enregistré'); resetForm(); await load(); draw();
+  });
+  $('#mode').onclick = guard(async e => { const b = e.target.closest('button'); if (!b) return; await saveSettings({ upstream_mode: b.dataset.m }); set.upstream_mode = b.dataset.m; draw(); });
+  $('#csave').onclick = guard(async () => {
+    await saveSettings({ block_mode: $('#bm').value, cache_enabled: $('#ce').checked, cache_size: +$('#cs').value, timeout_ms: +$('#ct').value });
+    toast('Réglages enregistrés'); await load(); draw();
+  });
+  $('#flush').onclick = guard(async () => { await api('POST', 'cache/flush'); toast('Cache vidé'); });
+  main.onclick = guard(async e => {
+    const t = e.target.closest('button'); if (!t) return;
+    const ids = ups.map(u => u.id);
+    if (t.dataset.up || t.dataset.down) {
+      const id = t.dataset.up || t.dataset.down, i = ids.indexOf(id), j = t.dataset.up ? i - 1 : i + 1;
+      [ids[i], ids[j]] = [ids[j], ids[i]]; await reorder(ids);
+    } else if (t.dataset.t) {
+      t.textContent = '…'; const r = await api('POST', `upstreams/${t.dataset.t}/test`);
+      toast(r.ok ? `Répond en ${r.latency_ms} ms` : `Échec : ${r.error}`, !r.ok); await load(); draw();
+    } else if (t.dataset.edit) {
+      const u = ups.find(x => x.id === t.dataset.edit); editing = u.id;
+      $('#un').value = u.name; $('#ua').value = u.address; $('#ub').value = u.bootstrap; $('#ud').value = u.domains.join(', ');
+      $('#usave').textContent = 'Enregistrer'; $('#uh').textContent = 'Modifier un upstream'; $('#ucancel').hidden = false; $('#un').focus();
+    } else if (t.dataset.del) {
+      if (t.dataset.sure !== '1') { t.dataset.sure = '1'; t.textContent = 'Confirmer ?'; setTimeout(() => { t.dataset.sure = ''; t.textContent = 'Supprimer'; }, 3000); return; }
+      await api('DELETE', `c/upstreams/${t.dataset.del}`); await load(); draw();
+    }
+  });
+  main.onchange = guard(async e => {
+    const id = e.target.dataset.tog; if (!id) return;
+    const u = ups.find(x => x.id === id), body = { ...u }; delete body.id; delete body.updated_at; body.enabled = e.target.checked;
+    await api('PUT', `c/upstreams/${id}`, body); await load(); draw();
+  });
+  let dragId = null;
+  main.ondragstart = e => { const r = e.target.closest('tr[data-id]'); if (r) { dragId = r.dataset.id; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', dragId); } };
+  main.ondragover = e => { const r = e.target.closest('tr[data-id]'); if (r && dragId) { e.preventDefault(); $$('#ut tr').forEach(x => x.classList.toggle('dragover', x === r)); } };
+  main.ondragend = () => { dragId = null; $$('#ut tr').forEach(x => x.classList.remove('dragover')); };
+  main.ondrop = guard(async e => {
+    const r = e.target.closest('tr[data-id]'); if (!r || !dragId || r.dataset.id === dragId) return;
+    e.preventDefault();
+    const ids = ups.map(u => u.id).filter(i => i !== dragId);
+    ids.splice(ids.indexOf(r.dataset.id), 0, dragId);
+    dragId = null; await reorder(ids);
+  });
+  await load(); draw();
+  every(async () => { if (dragId) return; health = await get('upstreams/status'); draw(); }, 4000);
+};
+
+pages.rewrites = async function (token) {
+  main.innerHTML = `<div class="head"><div><h1>Réécritures DNS</h1><p>Un domaine répond avec l'adresse (ou le nom) de ton choix. Les jokers sont acceptés : <span class="mono">*.apps.maison.lan</span>.</p></div>
+    <label class="row"><span class="muted">Toutes les réécritures</span>${sw(true, 'id="rwall"')}</label></div>
+    <div class="card"><div class="tblwrap"><table><thead><tr><th>Actif</th><th>Domaine</th><th>Réponse</th><th>Expire</th><th></th></tr></thead><tbody id="rt"></tbody></table></div></div>
+    <div class="card"><h2>Ajouter une réécriture</h2><div class="row">
+      <input class="f grow" id="rd" placeholder="nas.maison.lan" aria-label="Domaine"><input class="f grow" id="ra" placeholder="192.168.1.20 ou autre.domaine.lan" aria-label="Réponse">
+      <select class="f" id="rx" style="width:auto" aria-label="Expiration"><option value="0">Sans expiration</option><option value="60">Pendant 1 h</option><option value="120">Pendant 2 h</option><option value="1440">Pendant 24 h</option></select>
+      <button class="btn pri" id="radd">Ajouter</button></div></div>`;
+  async function draw() {
+    const [rws, set] = await Promise.all([get('c/rewrites'), getSettings()]);
+    if (token !== routeToken) return;
+    $('#rwall').checked = set.rewrites_enabled;
+    $('#rt').innerHTML = rws.length ? rws.map(r => `<tr><td>${sw(r.enabled, `data-tog="${r.id}"`)}</td><td class="mono">${esc(r.domain)}</td><td class="mono">${esc(r.answer)}</td>
+      <td>${r.expires_at ? (r.expires_at < Date.now() ? '<span class="tag warn">expirée</span>' : 'à ' + clock(r.expires_at)) : 'jamais'}</td>
+      <td><button class="btn sm danger" data-del="${r.id}">Supprimer</button></td></tr>`).join('') : '<tr><td colspan="5" class="empty">Aucune réécriture</td></tr>';
+  }
+  $('#radd').onclick = guard(async () => {
+    const m = +$('#rx').value;
+    await api('POST', 'c/rewrites', { domain: $('#rd').value, answer: $('#ra').value, enabled: true, expires_at: m ? Date.now() + m * 60000 : null });
+    $('#rd').value = ''; $('#ra').value = ''; toast('Réécriture ajoutée'); draw();
+  });
+  main.onclick = guard(async e => { const t = e.target.closest('[data-del]'); if (t) { await api('DELETE', `c/rewrites/${t.dataset.del}`); draw(); } });
+  main.onchange = guard(async e => {
+    if (e.target.id === 'rwall') { await saveSettings({ rewrites_enabled: e.target.checked }); toast(e.target.checked ? 'Réécritures activées' : 'Réécritures désactivées'); return; }
+    const id = e.target.dataset.tog; if (!id) return;
+    const r = (await get('c/rewrites')).find(x => x.id === id); delete r.id; delete r.updated_at; r.enabled = e.target.checked;
+    await api('PUT', `c/rewrites/${id}`, r); draw();
+  });
+  await draw();
+  every(draw, 6000);
+};
+
+pages.rules = async function (token) {
+  main.innerHTML = `<div class="head"><div><h1>Règles personnalisées</h1><p>Syntaxe AdGuard. Ces règles passent avant toutes les listes.</p></div></div>
+    <div class="cols"><div class="card"><h2>Éditeur</h2><textarea class="f" id="rtxt" spellcheck="false" aria-label="Règles"></textarea>
+      <div class="row" style="margin-top:12px"><button class="btn pri" id="rsave">Enregistrer</button><span class="muted" id="rinfo"></span></div></div>
+      <div class="stack"><div class="card"><h2>Tester un domaine</h2><div class="row"><input class="f grow" id="td" placeholder="www.exemple.com" aria-label="Domaine à tester"><button class="btn" id="tgo">Tester</button></div>
+        <div class="out" id="tout" style="margin-top:12px" aria-live="polite"><span class="muted">Le test utilise les règles enregistrées, les réécritures, les zones et les listes actives.</span></div></div>
+      <div class="card"><h2>Aide-mémoire</h2><div class="mono" style="line-height:1.9">
+        ||exemple.com^ <span class="muted">bloque le domaine et ses sous-domaines</span><br>@@||exemple.com^ <span class="muted">exception</span><br>||exemple.com^$important <span class="muted">prioritaire sur les exceptions</span><br>/^ad[0-9]+\\./ <span class="muted">expression régulière</span><br>||pub*.site.fr^ <span class="muted">joker</span><br>||jeu.lan^$dnsrewrite=10.0.0.5 <span class="muted">réécriture</span><br>! commentaire</div></div></div></div>`;
+  const cur = (await get('c/rules')).find(r => r.id === 'main');
+  if (token !== routeToken) return;
+  $('#rtxt').value = (cur && cur.text) || '';
+  const count = () => { const n = $('#rtxt').value.split('\n').filter(l => l.trim() && !/^[!#]/.test(l.trim())).length; $('#rinfo').textContent = `${n} règle(s)`; };
+  count(); $('#rtxt').oninput = count;
+  $('#rsave').onclick = guard(async () => { await api('PUT', 'c/rules/main', { text: $('#rtxt').value }); toast('Règles enregistrées et synchronisées'); });
+  const test = guard(async () => {
+    const r = await api('POST', 'check', { domain: $('#td').value });
+    const [t, c] = RESULT[r.result] || [r.result, ''];
+    $('#tout').innerHTML = `<span class="tag ${c}">${t}</span> ${r.rule ? `par <b class="mono">${esc(r.rule)}</b>${r.list ? ` <span class="muted">(${esc(r.list)})</span>` : ''}` : esc(r.detail || '')}`;
+  });
+  $('#tgo').onclick = test; $('#td').onkeydown = e => { if (e.key === 'Enter') test(); };
+};
+
+pages.records = async function (token) {
+  main.innerHTML = `<div class="head"><div><h1>Enregistrements DNS</h1><p>Atom répond avec autorité pour les zones ci-dessous. Un nom absent d'une zone locale reçoit NXDOMAIN, sans interroger les upstreams.</p></div></div>
+    <div class="card"><h2>Zones</h2><div class="row"><div class="seg" id="zs"></div><input class="f" id="zn" style="width:200px" placeholder="maison.lan" aria-label="Nouvelle zone"><button class="btn" id="zadd">Créer la zone</button></div></div>
+    <div id="zbody"></div>`;
+  let zones = [], recs = [], zone = null, editing = null;
+  async function load() { [zones, recs] = await Promise.all([get('c/zones'), get('c/records')]); if (!zone || !zones.find(z => z.name === zone)) zone = zones[0] ? zones[0].name : null; }
+  const TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'SRV', 'PTR', 'NS', 'CAA'];
+  const HINT = { A: '192.168.1.20', AAAA: 'fd00::20', CNAME: 'cible.maison.lan', MX: '10 mail.maison.lan', TXT: 'texte libre', SRV: '0 5 1883 hote.maison.lan', PTR: 'nas.maison.lan', NS: 'ns.maison.lan', CAA: '0 issue "letsencrypt.org"' };
+  function draw() {
+    if (token !== routeToken) return;
+    $('#zs').innerHTML = zones.length ? zones.map(z => `<button data-z="${esc(z.name)}" class="${z.name === zone ? 'on' : ''}">${esc(z.name)}</button>`).join('') : '<span class="muted" style="padding:6px 12px">Aucune zone</span>';
+    if (!zone) { $('#zbody').innerHTML = '<div class="card empty">Crée une première zone, par exemple <span class="mono">maison.lan</span>.</div>'; return; }
+    const rs = recs.filter(r => r.zone === zone).sort((a, b) => a.name.localeCompare(b.name) || a.type.localeCompare(b.type));
+    $('#zbody').innerHTML = `<div class="card" style="margin-top:14px"><h2>${esc(zone)} <button class="btn sm danger" data-zdel="1">Supprimer la zone</button></h2>
+      <div class="tblwrap"><table><thead><tr><th>Actif</th><th>Type</th><th>Nom</th><th>Valeur</th><th>TTL</th><th>PTR</th><th></th></tr></thead><tbody>
+      ${rs.length ? rs.map(r => `<tr><td>${sw(r.enabled, `data-tog="${r.id}"`)}</td><td><span class="tag acc">${r.type}</span></td><td class="mono">${esc(r.name || '@')}</td><td class="mono wrap">${esc(r.value)}</td><td>${r.ttl} s</td><td>${r.type === 'A' ? sw(r.ptr, `data-ptr="${r.id}"`) : ''}</td>
+        <td class="row" style="flex-wrap:nowrap"><button class="btn sm" data-edit="${r.id}">Modifier</button><button class="btn sm danger" data-del="${r.id}">Supprimer</button></td></tr>`).join('') : '<tr><td colspan="7" class="empty">Aucun enregistrement</td></tr>'}</tbody></table></div></div>
+      <div class="card" style="margin-top:14px"><h2 id="rh">Ajouter un enregistrement</h2><div class="row">
+        <select class="f" id="rtype" style="width:auto" aria-label="Type">${TYPES.map(t => `<option>${t}</option>`).join('')}</select>
+        <input class="f grow" id="rname" placeholder="nom (nas, *.apps, @)" aria-label="Nom"><input class="f grow" id="rval" placeholder="valeur (${HINT.A})" aria-label="Valeur">
+        <input class="f" id="rttl" style="width:90px" value="300" aria-label="TTL en secondes"><label class="row" id="rptrl"><span class="muted">PTR</span>${sw(false, 'id="rptr"')}</label>
+        <button class="btn pri" id="rsave">Ajouter</button><button class="btn" id="rcancel" hidden>Annuler</button></div>
+        <p class="note" style="margin-top:12px">Le numéro de série SOA évolue tout seul. Avec l'option PTR, un enregistrement A génère aussi la résolution inverse de son adresse.</p></div>`;
+    $('#rtype').onchange = () => { $('#rval').placeholder = `valeur (${HINT[$('#rtype').value]})`; $('#rptrl').hidden = $('#rtype').value !== 'A'; };
+  }
+  function reset() { editing = null; if ($('#rname')) { $('#rname').value = ''; $('#rval').value = ''; $('#rttl').value = 300; $('#rsave').textContent = 'Ajouter'; $('#rh').textContent = 'Ajouter un enregistrement'; $('#rcancel').hidden = true; } }
+  main.onclick = guard(async e => {
+    const t = e.target.closest('button'); if (!t) return;
+    if (t.id === 'zadd') { const n = $('#zn').value; await api('POST', 'c/zones', { name: n }); zone = n.trim().toLowerCase().replace(/\.$/, ''); $('#zn').value = ''; toast('Zone créée'); await load(); draw(); }
+    else if (t.dataset.z) { zone = t.dataset.z; editing = null; draw(); }
+    else if (t.dataset.zdel) {
+      if (t.dataset.sure !== '1') { t.dataset.sure = '1'; t.textContent = 'Confirmer ? Les enregistrements seront supprimés'; return; }
+      const z = zones.find(x => x.name === zone); await api('DELETE', `c/zones/${z.id}`); await load(); draw();
+    }
+    else if (t.id === 'rsave') {
+      const body = { zone, type: $('#rtype').value, name: $('#rname').value, value: $('#rval').value, ttl: +$('#rttl').value || 300, ptr: $('#rptr').checked, enabled: true };
+      if (editing) { const old = recs.find(r => r.id === editing); body.enabled = old.enabled; await api('PUT', `c/records/${editing}`, body); }
+      else await api('POST', 'c/records', body);
+      toast('Enregistrement enregistré'); const keep = zone; await load(); zone = keep; draw();
+    }
+    else if (t.id === 'rcancel') reset();
+    else if (t.dataset.del) { await api('DELETE', `c/records/${t.dataset.del}`); await load(); draw(); }
+    else if (t.dataset.edit) {
+      const r = recs.find(x => x.id === t.dataset.edit); editing = r.id;
+      $('#rtype').value = r.type; $('#rname').value = r.name; $('#rval').value = r.value; $('#rttl').value = r.ttl; $('#rptr').checked = r.ptr; $('#rptrl').hidden = r.type !== 'A';
+      $('#rsave').textContent = 'Enregistrer'; $('#rh').textContent = 'Modifier un enregistrement'; $('#rcancel').hidden = false; $('#rname').focus();
+    }
+  });
+  main.onchange = guard(async e => {
+    const id = e.target.dataset.tog || e.target.dataset.ptr; if (!id) return;
+    const r = recs.find(x => x.id === id), body = { ...r }; delete body.id; delete body.updated_at;
+    if (e.target.dataset.tog) body.enabled = e.target.checked; else body.ptr = e.target.checked;
+    await api('PUT', `c/records/${id}`, body); await load(); draw();
+  });
+  await load(); draw();
+};
+
+pages.cluster = async function (token) {
+  main.innerHTML = `<div class="head"><div><h1>Cluster</h1><p>Les nœuds appairés partagent la configuration et le journal en direct. Chacun reste utilisable seul si l'autre tombe.</p></div>
+    <button class="btn" id="syncnow">Synchroniser maintenant</button></div><div id="cbody"></div>`;
+  async function draw() {
+    const c = await get('cluster');
+    if (token !== routeToken) return;
+    const active = document.activeElement && document.activeElement.closest('#joinbox');
+    if (active) return;
+    $('#cbody').innerHTML = `<div class="card"><h2>Nœuds</h2><div class="tblwrap"><table><thead><tr><th>Nœud</th><th>Adresse</th><th>État</th><th>Latence</th><th>Dernière synchro</th><th></th></tr></thead><tbody>
+      <tr><td><b>${esc(c.node.name)}</b> <span class="muted">(ce nœud)</span></td><td class="mono">${esc(c.node.advertise_url || location.origin)}</td><td><span class="dot up"></span>en ligne</td><td>–</td><td>–</td><td></td></tr>
+      ${c.peers.map(p => `<tr><td><b>${esc(p.name)}</b></td><td class="mono">${esc(p.url)}</td>
+        <td>${p.ok ? '<span class="dot up"></span>synchronisé' : `<span class="dot down"></span><span title="${esc(p.error || '')}">injoignable</span>`}</td>
+        <td>${p.ok ? p.latency_ms + ' ms' : '–'}</td><td>${ago(p.last_ok)}</td><td><button class="btn sm danger" data-rm="${p.id}">Retirer</button></td></tr>`).join('')}</tbody></table></div></div>
+      <div class="cols" style="margin-top:14px" id="joinbox">
+        <div class="card"><h2>Ajouter ce nœud à un cluster</h2><div class="stack">
+          <label class="lbl">Adresse de l'autre nœud<input class="f" id="ju" placeholder="http://192.168.1.2:3000"></label>
+          <label class="lbl">Code d'appairage de l'autre nœud<input class="f" id="jt" placeholder="affiché sur son écran Cluster"></label>
+          <label class="lbl">Adresse de ce nœud, telle que l'autre nœud peut la joindre<input class="f" id="js" value="${esc(c.node.advertise_url || location.origin)}"></label>
+          <div class="row"><button class="btn pri" id="jgo">Rejoindre</button></div>
+          <p class="note">Ce nœud adopte le code de l'autre, puis récupère sa configuration. Les valeurs par défaut de ce nœud sont remplacées par celles du cluster. Si tu avais déjà modifié des réglages ici, les deux versions sont fusionnées objet par objet, la plus récente gagne.</p></div></div>
+        <div class="card"><h2>Code d'appairage de ce nœud</h2>
+          <p class="muted" style="margin-bottom:10px">À saisir sur l'autre nœud pour qu'il rejoigne celui-ci.</p>
+          <div class="token" id="tk">${esc(c.token)}</div>
+          <div class="row" style="margin-top:10px"><button class="btn sm" id="cp">Copier</button></div>
+          <p class="note" style="margin-top:14px">Les échanges entre nœuds passent en HTTP simple, protégés par ce code. Garde le cluster sur ton réseau local, ou place les nœuds derrière un VPN ou un reverse proxy HTTPS.</p></div></div>`;
+  }
+  main.onclick = guard(async e => {
+    const t = e.target.closest('button'); if (!t) return;
+    if (t.id === 'syncnow') { await api('POST', 'cluster/sync'); toast('Synchronisation effectuée'); draw(); }
+    else if (t.id === 'jgo') {
+      t.disabled = true;
+      try { await api('POST', 'cluster/join', { url: $('#ju').value, token: $('#jt').value, self_url: $('#js').value }); toast('Nœud ajouté au cluster'); } finally { t.disabled = false; }
+      draw();
+    }
+    else if (t.id === 'cp') { try { await navigator.clipboard.writeText($('#tk').textContent); toast('Code copié'); } catch { const r = document.createRange(); r.selectNodeContents($('#tk')); getSelection().removeAllRanges(); getSelection().addRange(r); toast('Sélectionné, copie avec Ctrl+C'); } }
+    else if (t.dataset.rm) { await api('DELETE', `cluster/peers/${t.dataset.rm}`); draw(); }
+  });
+  await draw();
+  every(draw, 3000);
+};
+
+// ---------- routeur ----------
+
+async function nodeChip() {
+  try {
+    const [i, c] = await Promise.all([get('info'), get('cluster')]);
+    const ok = c.peers.filter(p => p.ok).length;
+    $('#nodechip').innerHTML = `<b>${esc(i.name)}</b><br>v${esc(i.version)} · DNS ${i.dns_ok ? 'actif' : '<span style="color:var(--bad)">inactif</span>'}<br>${c.peers.length ? `cluster : ${ok + 1}/${c.peers.length + 1} nœuds` : 'nœud seul'}`;
+  } catch { /* ignoré */ }
+}
+
+async function route() {
+  timers.forEach(clearInterval); timers = [];
+  main.onclick = main.onchange = main.oninput = main.ondragstart = main.ondragover = main.ondragend = main.ondrop = null;
+  const name = (location.hash || '#dashboard').slice(1);
+  const r = pages[name] ? name : 'dashboard';
+  $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.r === r));
+  const token = ++routeToken;
+  try { await pages[r](token); } catch (e) { if (token === routeToken) main.innerHTML = `<div class="card"><h2>Erreur</h2><p>${esc(e.message)}</p></div>`; }
+  nodeChip();
+}
+window.addEventListener('hashchange', route);
+setInterval(nodeChip, 10000);
+route();
