@@ -23,6 +23,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/tls/cluster/selfsigned", post(cluster_selfsigned))
         .route("/api/tls/cluster/pki", post(cluster_pki))
         .route("/api/tls/cluster/off", post(cluster_off))
+        .route("/api/tls/cluster/resume", post(cluster_resume))
         .route("/api/tls/cluster/renew", post(cluster_renew))
         .route("/api/tls/ca.crt", get(ca_download))
         .route("/api/sync/tlsinfo", get(sync_tlsinfo))
@@ -188,7 +189,13 @@ fn need_names(app: &App) -> Result<Vec<String>, ApiErr> {
 
 async fn cluster_init_ca(State(app): State<Arc<App>>) -> Res {
     if tls::read(&app, "ca.key").is_some() {
-        return Err(bad("une autorité de certification existe déjà sur ce nœud"));
+        if app.node.lock().tls.cluster_mode == "ca" {
+            return Err(bad("l'autorité du cluster est déjà active sur ce nœud"));
+        }
+        // L'autorité existe déjà (chiffrement désactivé entre-temps) : on la réactive telle quelle.
+        app.node.lock().tls.cluster_mode = "ca".into();
+        reload(&app);
+        return Ok(Json(json!({"ok": true, "pairing_code": pairing_code(&app)})));
     }
     let names = need_names(&app)?;
     let (ca, cak) = tls::gen_ca("Atom cluster CA").map_err(err)?;
@@ -241,6 +248,8 @@ async fn cluster_pki(State(app): State<Arc<App>>, Json(r): Json<PkiReq>) -> Res 
     if !cas.iter().all(|c| tls::cert_info_der(c).map_or(false, |i| i.is_ca)) {
         return Err(bad("le fichier d'autorités doit contenir uniquement des certificats d'autorité (CA)"));
     }
+    let announced = tls::url_host(&app.node.lock().advertise_url);
+    tls::validate_pki(&r.cert_pem, &r.ca_pem, announced.as_deref()).map_err(err)?;
     tls::write(&app, "node.crt", &r.cert_pem).map_err(err)?;
     tls::write(&app, "node.key", &r.key_pem).map_err(err)?;
     tls::write(&app, "ca.crt", &r.ca_pem).map_err(err)?;
@@ -255,7 +264,24 @@ async fn cluster_pki(State(app): State<Arc<App>>, Json(r): Json<PkiReq>) -> Res 
 }
 
 async fn cluster_off(State(app): State<Arc<App>>) -> Res {
-    app.node.lock().tls.cluster_mode = "off".into();
+    {
+        let mut n = app.node.lock();
+        if n.tls.cluster_mode != "off" {
+            n.tls.previous_mode = n.tls.cluster_mode.clone();
+        }
+        n.tls.cluster_mode = "off".into();
+    }
+    reload(&app);
+    Ok(Json(json!({"ok": true})))
+}
+
+/// Réactive le dernier mode de chiffrement : les certificats sont conservés, pas d'appairage à refaire.
+async fn cluster_resume(State(app): State<Arc<App>>) -> Res {
+    let prev = app.node.lock().tls.previous_mode.clone();
+    if prev.is_empty() || tls::read(&app, "node.crt").is_none() || tls::read(&app, "node.key").is_none() || tls::read(&app, "ca.crt").is_none() {
+        return Err(bad("aucun chiffrement précédent à réactiver"));
+    }
+    app.node.lock().tls.cluster_mode = prev;
     reload(&app);
     Ok(Json(json!({"ok": true})))
 }

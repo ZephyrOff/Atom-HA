@@ -35,11 +35,13 @@ pub struct TlsSettings {
     pub redirect_http: bool,
     /// off | ca | selfsigned | pki
     pub cluster_mode: String,
+    /// Mode utilisé avant la désactivation, pour pouvoir le réactiver sans refaire l'appairage.
+    pub previous_mode: String,
 }
 
 impl Default for TlsSettings {
     fn default() -> Self {
-        Self { web_enabled: false, web_port: 3443, hostname: String::new(), redirect_http: false, cluster_mode: "off".into() }
+        Self { web_enabled: false, web_port: 3443, hostname: String::new(), redirect_http: false, cluster_mode: "off".into(), previous_mode: String::new() }
     }
 }
 
@@ -205,6 +207,8 @@ pub struct CertInfo {
     pub subject: String,
     pub issuer: String,
     pub names: Vec<String>,
+    /// Parmi les noms, ceux déclarés comme adresses IP (et non comme noms DNS).
+    pub ips: Vec<String>,
     pub not_before: u64,
     pub not_after: u64,
     pub fingerprint: String,
@@ -215,17 +219,22 @@ pub fn cert_info_der(der: &[u8]) -> Result<CertInfo> {
     use x509_parser::prelude::*;
     let (_, c) = parse_x509_certificate(der).map_err(|e| anyhow!("certificat invalide : {e}"))?;
     let mut names = Vec::new();
+    let mut ips = Vec::new();
     if let Ok(Some(san)) = c.subject_alternative_name() {
         for g in &san.value.general_names {
             match g {
                 GeneralName::DNSName(d) => names.push(d.to_string()),
                 GeneralName::IPAddress(b) => {
                     if b.len() == 4 {
-                        names.push(std::net::Ipv4Addr::new(b[0], b[1], b[2], b[3]).to_string());
+                        let ip = std::net::Ipv4Addr::new(b[0], b[1], b[2], b[3]).to_string();
+                        ips.push(ip.clone());
+                        names.push(ip);
                     } else if b.len() == 16 {
                         let mut a = [0u8; 16];
                         a.copy_from_slice(b);
-                        names.push(std::net::Ipv6Addr::from(a).to_string());
+                        let ip = std::net::Ipv6Addr::from(a).to_string();
+                        ips.push(ip.clone());
+                        names.push(ip);
                     }
                 }
                 _ => {}
@@ -236,6 +245,7 @@ pub fn cert_info_der(der: &[u8]) -> Result<CertInfo> {
         subject: c.subject().to_string(),
         issuer: c.issuer().to_string(),
         names,
+        ips,
         not_before: (c.validity().not_before.timestamp().max(0) as u64) * 1000,
         not_after: (c.validity().not_after.timestamp().max(0) as u64) * 1000,
         fingerprint: fingerprint_der(der),
@@ -246,6 +256,63 @@ pub fn cert_info_der(der: &[u8]) -> Result<CertInfo> {
 pub fn cert_info(pem: &str) -> Result<CertInfo> {
     let c = certs_from_pem(pem)?;
     cert_info_der(&c[0])
+}
+
+/// Explique en français pourquoi rustls refuse un certificat.
+pub fn explain(e: &rustls::Error) -> String {
+    use rustls::CertificateError as C;
+    match e {
+        rustls::Error::InvalidCertificate(c) => match c {
+            C::UnknownIssuer => "l'autorité fournie n'est pas celle qui a signé ce certificat (ou une autorité intermédiaire manque dans le certificat)".into(),
+            C::InvalidPurposeContext { required, presented } => format!("le certificat n'a pas l'usage requis ({required:?}) ; usages présents : {presented:?}. Il faut l'extension « Extended Key Usage » avec serverAuth et clientAuth"),
+            C::InvalidPurpose => "le certificat n'autorise pas cet usage : il lui manque l'extension « Extended Key Usage » avec serverAuth et clientAuth".into(),
+            C::NotValidForName | C::NotValidForNameContext { .. } => "l'adresse ou le nom utilisé n'est pas dans la liste des noms (SAN) du certificat".into(),
+            C::Expired | C::ExpiredContext { .. } => "le certificat est expiré".into(),
+            C::NotValidYet | C::NotValidYetContext { .. } => "le certificat n'est pas encore valide (vérifie l'heure du nœud)".into(),
+            C::BadSignature => "la signature du certificat est invalide".into(),
+            other => format!("{other:?}"),
+        },
+        other => other.to_string(),
+    }
+}
+
+/// Vérifie qu'un certificat de nœud fourni par l'utilisateur sera accepté : émis par l'autorité donnée,
+/// utilisable comme serveur et comme client, valable pour ses propres noms.
+pub fn validate_pki(cert_pem: &str, ca_pem: &str, required_name: Option<&str>) -> Result<()> {
+    use rustls::client::danger::ServerCertVerifier;
+    use rustls::pki_types::{ServerName, UnixTime};
+    let chain = certs_from_pem(cert_pem)?;
+    let (end, inter) = chain.split_first().ok_or_else(|| anyhow!("certificat vide"))?;
+    let mut roots = RootCertStore::empty();
+    for c in certs_from_pem(ca_pem)? {
+        roots.add(c).map_err(|e| anyhow!("autorité inutilisable : {e}"))?;
+    }
+    let roots = Arc::new(roots);
+    let now = UnixTime::now();
+    let cv = rustls::server::WebPkiClientVerifier::builder_with_provider(roots.clone(), provider())
+        .build()
+        .map_err(|e| anyhow!("{e}"))?;
+    cv.verify_client_cert(end, inter, now).map_err(|e| anyhow!("usage « client » refusé : {}", explain(&e)))?;
+    let info = cert_info_der(end)?;
+    if info.names.is_empty() {
+        bail!("le certificat ne contient aucun nom (SAN) : ajoute l'adresse IP ou le nom du nœud");
+    }
+    if let Some(n) = required_name {
+        if n.parse::<std::net::IpAddr>().is_ok() && !info.ips.iter().any(|x| x == n) {
+            if info.names.iter().any(|x| x == n) {
+                bail!("« {n} » est déclaré comme nom DNS dans le certificat : une adresse IP doit être déclarée comme « IP Address » dans le SAN (subjectAltName = IP:{n}), sinon elle est refusée");
+            }
+            bail!("l'adresse annoncée « {n} » n'est pas dans le certificat (noms présents : {})", info.names.join(", "));
+        }
+        if !info.names.iter().any(|x| x.eq_ignore_ascii_case(n)) {
+            bail!("l'adresse annoncée « {n} » n'est pas dans le certificat (noms présents : {})", info.names.join(", "));
+        }
+    }
+    let sv = rustls::client::WebPkiServerVerifier::builder_with_provider(roots, provider()).build().map_err(|e| anyhow!("{e}"))?;
+    let name = required_name.unwrap_or(&info.names[0]).to_string();
+    let sn = ServerName::try_from(name.clone()).map_err(|e| anyhow!("nom invalide : {e}"))?;
+    sv.verify_server_cert(end, inter, &sn, &[], now).map_err(|e| anyhow!("usage « serveur » refusé pour {name} : {}", explain(&e)))?;
+    Ok(())
 }
 
 // ---------- confiance entre nœuds ----------
@@ -507,6 +574,40 @@ mod tests {
         let i2 = cert_info(&crt2).unwrap();
         assert!(i2.names.contains(&"n2.lan".to_string()) && i2.names.contains(&"192.168.1.9".to_string()));
         assert_eq!(i2.issuer, cert_info(&ca_crt).unwrap().subject);
+    }
+
+    #[test]
+    fn pki_validation_explains_problems() {
+        let (ca, cak) = gen_ca("Test CA").unwrap();
+        let (good, _) = issue_leaf(&ca, &cak, &["192.168.2.113".to_string()], "n", 30).unwrap();
+        validate_pki(&good, &ca, Some("192.168.2.113")).unwrap();
+        // autre adresse que celle du certificat
+        let e = validate_pki(&good, &ca, Some("192.168.2.99")).unwrap_err().to_string();
+        assert!(e.contains("192.168.2.99"), "{e}");
+        // autre autorité
+        let (other, _) = gen_ca("Autre").unwrap();
+        let e = validate_pki(&good, &other, None).unwrap_err().to_string();
+        assert!(e.contains("autorité"), "{e}");
+        // certificat réservé à l'usage serveur : refusé comme certificat client
+        let issuer = Issuer::from_ca_cert_pem(&ca, KeyPair::from_pem(&cak).unwrap()).unwrap();
+        let key = KeyPair::generate().unwrap();
+        let mut p = leaf_params(&["10.0.0.7".to_string()], "srv", 30).unwrap();
+        p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let srv_only = p.signed_by(&key, &issuer).unwrap().pem();
+        let e = validate_pki(&srv_only, &ca, None).unwrap_err().to_string();
+        assert!(e.contains("client") && e.contains("Extended Key Usage"), "{e}");
+    }
+
+    #[test]
+    fn ip_declared_as_dns_name_is_explained() {
+        let (ca, cak) = gen_ca("Test CA").unwrap();
+        let issuer = Issuer::from_ca_cert_pem(&ca, KeyPair::from_pem(&cak).unwrap()).unwrap();
+        let key = KeyPair::generate().unwrap();
+        let mut p = leaf_params(&[], "n", 30).unwrap();
+        p.subject_alt_names = vec![SanType::DnsName("192.168.2.113".try_into().unwrap())];
+        let crt = p.signed_by(&key, &issuer).unwrap().pem();
+        let e = validate_pki(&crt, &ca, Some("192.168.2.113")).unwrap_err().to_string();
+        assert!(e.contains("IP Address"), "{e}");
     }
 
     #[test]

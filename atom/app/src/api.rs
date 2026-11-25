@@ -998,6 +998,21 @@ async fn cluster(State(app): State<Arc<App>>) -> Res {
     })))
 }
 
+/// Une erreur réseau avec toutes ses causes (par exemple l'erreur TLS précise).
+fn err_chain(e: &dyn std::error::Error) -> String {
+    let mut s = e.to_string();
+    let mut cur = e.source();
+    while let Some(c) = cur {
+        let m = c.to_string();
+        if !s.contains(&m) {
+            s.push_str(" → ");
+            s.push_str(&m);
+        }
+        cur = c.source();
+    }
+    s
+}
+
 #[derive(Deserialize)]
 struct JoinReq {
     url: String,
@@ -1033,7 +1048,7 @@ async fn cluster_join(State(app): State<Arc<App>>, Json(r): Json<JoinReq>) -> Re
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
-        .map_err(|e| bad(format!("connexion impossible : {e}")))?;
+        .map_err(|e| bad(format!("connexion impossible : {}", err_chain(&e))))?;
     if info_resp.status() == StatusCode::UNAUTHORIZED {
         return Err(bad("code d'appairage refusé"));
     }
@@ -1070,7 +1085,7 @@ async fn cluster_join(State(app): State<Arc<App>>, Json(r): Json<JoinReq>) -> Re
                 .json(&json!({"id": id, "name": name, "url": self_url}))
                 .send()
                 .await
-                .map_err(|e| bad(format!("connexion impossible : {e}")))?;
+                .map_err(|e| bad(format!("connexion impossible : {}", err_chain(&e))))?;
             if !resp.status().is_success() {
                 return Err(bad(format!("l'autre nœud a répondu {}", resp.status())));
             }
@@ -1094,7 +1109,7 @@ async fn cluster_join(State(app): State<Arc<App>>, Json(r): Json<JoinReq>) -> Re
                 .json(&json!({"id": id, "name": name, "url": self_url, "kind": "csr", "csr_pem": csr}))
                 .send()
                 .await
-                .map_err(|e| bad(format!("connexion impossible : {e}")))?
+                .map_err(|e| bad(format!("connexion impossible : {}", err_chain(&e))))?
                 .json()
                 .await
                 .map_err(|e| bad(e.to_string()))?;
@@ -1132,7 +1147,7 @@ async fn cluster_join(State(app): State<Arc<App>>, Json(r): Json<JoinReq>) -> Re
                 .json(&json!({"id": id, "name": name, "url": self_url, "kind": "ca", "ca_pem": mine}))
                 .send()
                 .await
-                .map_err(|e| bad(format!("connexion impossible : {e}")))?
+                .map_err(|e| bad(format!("connexion impossible : {}", err_chain(&e))))?
                 .json()
                 .await
                 .map_err(|e| bad(e.to_string()))?;
@@ -1160,7 +1175,7 @@ async fn cluster_join(State(app): State<Arc<App>>, Json(r): Json<JoinReq>) -> Re
                 .json(&json!({"id": id, "name": name, "url": self_url}))
                 .send()
                 .await
-                .map_err(|e| bad(format!("connexion impossible (vérifie que les certificats sont signés par la même autorité et couvrent l'adresse utilisée) : {e}")))?;
+                .map_err(|e| bad(format!("connexion impossible : {}. Vérifie que l'autre nœud est en mode PKI privée avec son certificat importé, qu'il écoute sur ce port HTTPS, et que l'adresse saisie figure dans son certificat.", err_chain(&e))))?;
             if !resp.status().is_success() {
                 return Err(bad(format!("l'autre nœud a répondu {}", resp.status())));
             }

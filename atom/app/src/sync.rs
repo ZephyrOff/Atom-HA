@@ -135,7 +135,7 @@ pub async fn sync_once(app: &Arc<App>) {
                 let mut ps = app.peer_status.lock();
                 let s = ps.entry(p.id.clone()).or_default();
                 s.ok = false;
-                s.last_error = Some(e.to_string());
+                s.last_error = Some(format!("{e:#}"));
                 if s.name.is_empty() {
                     s.name = p.name.clone();
                 }

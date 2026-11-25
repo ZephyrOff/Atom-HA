@@ -1,5 +1,5 @@
 name: Atom
-version: "0.2.0"
+version: "0.2.1"
 slug: atom
 description: Résolveur DNS filtrant compatible AdGuard, avec cluster multi-nœuds
 url: https://github.com/zephyroff/atom-ha
