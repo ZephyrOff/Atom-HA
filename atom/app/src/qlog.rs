@@ -44,8 +44,18 @@ pub struct LogFilter {
     pub search: String,
     pub status: String,
     pub node: String,
+    pub client: String,
+    pub qtype: String,
     pub limit: usize,
     pub before: Option<u64>,
+    pub from: Option<u64>,
+    pub to: Option<u64>,
+}
+
+#[derive(Serialize, Default)]
+pub struct Facets {
+    pub clients: Vec<String>,
+    pub qtypes: Vec<String>,
 }
 
 #[derive(Serialize, Default)]
@@ -130,6 +140,7 @@ impl QLog {
     pub fn query(&self, f: &LogFilter) -> Vec<LogEntry> {
         let g = self.inner.lock();
         let search = f.search.to_lowercase();
+        let client = f.client.to_lowercase();
         let limit = f.limit.clamp(1, 1000);
         let mut all: Vec<LogEntry> = Vec::new();
         for (origin, m) in g.per.iter() {
@@ -143,7 +154,26 @@ impl QLog {
                         continue;
                     }
                 }
-                if !f.status.is_empty() && f.status != "all" && e.result != f.status {
+                if let Some(t) = f.to {
+                    if e.ts > t {
+                        continue;
+                    }
+                }
+                if let Some(fr) = f.from {
+                    if e.ts < fr {
+                        break;
+                    }
+                }
+                if !f.status.is_empty() && f.status != "all" {
+                    let ok = if f.status == "cached" { e.cached } else { e.result == f.status };
+                    if !ok {
+                        continue;
+                    }
+                }
+                if !client.is_empty() && !e.client.to_lowercase().contains(&client) {
+                    continue;
+                }
+                if !f.qtype.is_empty() && !e.qtype.eq_ignore_ascii_case(&f.qtype) {
                     continue;
                 }
                 if !search.is_empty() {
@@ -162,6 +192,21 @@ impl QLog {
         all.sort_by(|a, b| b.ts.cmp(&a.ts).then(b.seq.cmp(&a.seq)));
         all.truncate(limit);
         all
+    }
+
+    pub fn facets(&self) -> Facets {
+        let g = self.inner.lock();
+        let mut clients: std::collections::BTreeSet<String> = Default::default();
+        let mut qtypes: std::collections::BTreeSet<String> = Default::default();
+        for m in g.per.values() {
+            for e in m.values() {
+                if clients.len() < 500 {
+                    clients.insert(e.client.clone());
+                }
+                qtypes.insert(e.qtype.clone());
+            }
+        }
+        Facets { clients: clients.into_iter().collect(), qtypes: qtypes.into_iter().collect() }
     }
 
     pub fn stats(&self, node_filter: &str) -> Stats {

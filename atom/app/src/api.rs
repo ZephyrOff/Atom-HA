@@ -58,6 +58,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/lists/{id}/refresh", post(list_refresh))
         .route("/api/check", post(check))
         .route("/api/log", get(log))
+        .route("/api/log/facets", get(log_facets))
         .route("/api/stats", get(stats))
         .route("/api/cache/flush", post(cache_flush))
         .route("/api/pause", post(pause))
@@ -363,8 +364,16 @@ struct LogParams {
     search: Option<String>,
     status: Option<String>,
     node: Option<String>,
+    client: Option<String>,
+    qtype: Option<String>,
     limit: Option<usize>,
     before: Option<u64>,
+    from: Option<u64>,
+    to: Option<u64>,
+}
+
+async fn log_facets(State(app): State<Arc<App>>) -> Res {
+    Ok(Json(serde_json::to_value(app.qlog.facets()).unwrap_or_default()))
 }
 
 async fn log(State(app): State<Arc<App>>, QS(p): QS<LogParams>) -> Res {
@@ -372,8 +381,12 @@ async fn log(State(app): State<Arc<App>>, QS(p): QS<LogParams>) -> Res {
         search: p.search.unwrap_or_default(),
         status: p.status.unwrap_or_default(),
         node: p.node.unwrap_or_default(),
+        client: p.client.unwrap_or_default(),
+        qtype: p.qtype.unwrap_or_default(),
         limit: p.limit.unwrap_or(100),
         before: p.before,
+        from: p.from,
+        to: p.to,
     };
     Ok(Json(serde_json::to_value(app.qlog.query(&f)).unwrap_or_default()))
 }
