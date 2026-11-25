@@ -1,0 +1,33 @@
+name: Atom
+version: "0.1.0"
+slug: atom
+description: Résolveur DNS filtrant compatible AdGuard, avec cluster multi-nœuds
+url: https://github.com/CHANGE-ME/atom
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: services
+boot: auto
+ingress: true
+ingress_port: 3000
+panel_icon: mdi:dns
+panel_title: Atom
+ports:
+  53/udp: 53
+  53/tcp: 53
+  3000/tcp: 3000
+ports_description:
+  53/udp: Serveur DNS (UDP)
+  53/tcp: Serveur DNS (TCP)
+  3000/tcp: Interface web et synchronisation du cluster
+options:
+  password: ""
+  node_name: ""
+  advertise_url: ""
+  log_retention: 100000
+schema:
+  password: password?
+  node_name: str?
+  advertise_url: str?
+  log_retention: int(1000,1000000)?
