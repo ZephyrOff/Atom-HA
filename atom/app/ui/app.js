@@ -685,6 +685,7 @@ async function route() {
   const navKey = r === 'client' || r === 'group' ? 'clients' : r;
   $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.r === navKey));
   $('#side').classList.remove('open');
+  if (window.syncNav) syncNav();
   const token = ++routeToken;
   try { await pages[r](token, param); } catch (e) { if (token === routeToken) main.innerHTML = `<div class="card"><h2>Erreur</h2><p>${esc(e.message)}</p></div>`; }
   nodeChip();

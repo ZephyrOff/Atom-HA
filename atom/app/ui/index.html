@@ -22,26 +22,46 @@
     <div class="sidebody" id="sidebody">
       <button class="btn searchbtn" id="searchbtn" type="button" aria-label="Rechercher">🔍 Rechercher <kbd>/</kbd></button>
       <nav id="nav" aria-label="Navigation principale">
-        <div class="navgrp">Surveillance</div>
-        <a href="#dashboard" data-r="dashboard">Tableau de bord</a>
-        <a href="#log" data-r="log">Journal</a>
-        <a href="#health" data-r="health">Santé</a>
-        <div class="navgrp">Appareils</div>
-        <a href="#clients" data-r="clients">Clients et groupes</a>
-        <a href="#access" data-r="access">Accès réseau</a>
-        <div class="navgrp">Filtrage</div>
-        <a href="#filters" data-r="filters">Listes de filtrage</a>
-        <a href="#rules" data-r="rules">Règles personnalisées</a>
-        <div class="navgrp">Résolution DNS</div>
-        <a href="#dns" data-r="dns">Upstreams et réglages</a>
-        <a href="#rewrites" data-r="rewrites">Réécritures</a>
-        <a href="#records" data-r="records">Enregistrements</a>
-        <a href="#cache" data-r="cache">Cache</a>
-        <div class="navgrp">Administration</div>
-        <a href="#cluster" data-r="cluster">Cluster</a>
-        <a href="#history" data-r="history">Historique et sauvegardes</a>
-        <a href="#certs" data-r="certs">Certificats</a>
-        <a href="#security" data-r="security">Sécurité</a>
+        <div class="grp" data-g="surv" style="--c:var(--g1)">
+          <button class="gh" type="button" aria-expanded="false" aria-controls="items-surv"><span class="gl"><span class="dotc"></span>Surveillance</span><i aria-hidden="true">›</i></button>
+          <div class="items" id="items-surv">
+          <a href="#dashboard" data-r="dashboard">Tableau de bord</a>
+          <a href="#log" data-r="log">Journal</a>
+          <a href="#health" data-r="health">Santé</a>
+          </div>
+        </div>
+        <div class="grp" data-g="app" style="--c:var(--g2)">
+          <button class="gh" type="button" aria-expanded="false" aria-controls="items-app"><span class="gl"><span class="dotc"></span>Appareils</span><i aria-hidden="true">›</i></button>
+          <div class="items" id="items-app">
+          <a href="#clients" data-r="clients">Clients et groupes</a>
+          <a href="#access" data-r="access">Accès réseau</a>
+          </div>
+        </div>
+        <div class="grp" data-g="filt" style="--c:var(--g3)">
+          <button class="gh" type="button" aria-expanded="false" aria-controls="items-filt"><span class="gl"><span class="dotc"></span>Filtrage</span><i aria-hidden="true">›</i></button>
+          <div class="items" id="items-filt">
+          <a href="#filters" data-r="filters">Listes de filtrage</a>
+          <a href="#rules" data-r="rules">Règles personnalisées</a>
+          </div>
+        </div>
+        <div class="grp" data-g="dns" style="--c:var(--g4)">
+          <button class="gh" type="button" aria-expanded="false" aria-controls="items-dns"><span class="gl"><span class="dotc"></span>Résolution DNS</span><i aria-hidden="true">›</i></button>
+          <div class="items" id="items-dns">
+          <a href="#dns" data-r="dns">Upstreams et réglages</a>
+          <a href="#rewrites" data-r="rewrites">Réécritures</a>
+          <a href="#records" data-r="records">Enregistrements</a>
+          <a href="#cache" data-r="cache">Cache</a>
+          </div>
+        </div>
+        <div class="grp" data-g="adm" style="--c:var(--g5)">
+          <button class="gh" type="button" aria-expanded="false" aria-controls="items-adm"><span class="gl"><span class="dotc"></span>Administration</span><i aria-hidden="true">›</i></button>
+          <div class="items" id="items-adm">
+          <a href="#cluster" data-r="cluster">Cluster</a>
+          <a href="#history" data-r="history">Historique et sauvegardes</a>
+          <a href="#certs" data-r="certs">Certificats</a>
+          <a href="#security" data-r="security">Sécurité</a>
+          </div>
+        </div>
       </nav>
       <div class="nodechip" id="nodechip">…</div>
       <div class="sidetools">

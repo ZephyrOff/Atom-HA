@@ -215,8 +215,37 @@ get('auth/me').then(m => {
     btn.textContent = open ? '✕ Fermer' : '☰ Menu';
   };
   btn.onclick = () => set(!side.classList.contains('open'));
-  $('#nav').addEventListener('click', () => set(false));
+  $('#nav').addEventListener('click', e => { if (e.target.closest('a')) set(false); });
   $('#searchbtn').addEventListener('click', () => set(false));
   window.addEventListener('hashchange', () => set(false));
   matchMedia('(min-width: 821px)').addEventListener('change', e => { if (e.matches) set(false); });
+}
+
+// ---------- menu en groupes repliables ----------
+
+{
+  const KEY = 'atom-nav';
+  let saved = [];
+  try { saved = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch { /* stockage indisponible */ }
+  const grps = $$('#nav .grp');
+  const store = () => { try { localStorage.setItem(KEY, JSON.stringify(grps.filter(g => g.classList.contains('open')).map(g => g.dataset.g))); } catch { /* ignoré */ } };
+  const setOpen = (g, open) => { g.classList.toggle('open', open); $('.gh', g).setAttribute('aria-expanded', String(open)); };
+  grps.forEach(g => setOpen(g, saved.includes(g.dataset.g)));
+  // Le groupe de la page affichée est toujours ouvert et repéré par sa pastille.
+  window.syncNav = () => {
+    grps.forEach(g => {
+      const cur = !!$('a.on', g);
+      g.classList.toggle('cur', cur);
+      if (cur) setOpen(g, true);
+    });
+    store();
+  };
+  $('#nav').addEventListener('click', e => {
+    const h = e.target.closest('.gh');
+    if (!h) return;
+    const g = h.parentElement;
+    setOpen(g, !g.classList.contains('open'));
+    store();
+  });
+  syncNav();
 }
