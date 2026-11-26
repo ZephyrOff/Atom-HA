@@ -224,9 +224,12 @@ pub async fn resolve(app: &Arc<App>, req: &[u8], q: &Query, client: IpAddr) -> O
     if let Some(d) = eng.temp_allowed(&q.name, now).filter(|_| eng.settings.filtering_enabled && !paused) {
         reason = format!("autorisation temporaire ({d})");
         list = "Autorisation temporaire".into();
+    } else if let Some(who) = eng.bypass(&ident, now).filter(|_| eng.settings.filtering_enabled && !paused) {
+        reason = format!("filtrage suspendu pour {who}");
+        list = "Filtrage suspendu".into();
     } else if eng.settings.filtering_enabled && !paused {
         let fctx = filter::Ctx { ip: client, client_name: eng.client_name(&ident), qtype: q.qtype };
-        if let Some(hit) = filter::check(&eng.lists, &q.name, &fctx, &eng.disabled) {
+        if let Some(hit) = filter::check(&eng.lists_for(&ident), &q.name, &fctx, &eng.disabled) {
             match hit.kind {
                 HitKind::Block => {
                     let mut o = out(answer_block(&eng, q, None), "blocked");

@@ -24,6 +24,8 @@ function blockInfo(o) {
   if (live && o.block_lan) t.push('LAN');
   return t;
 }
+const bypassUntil = o => (o.filter_bypass_until && o.filter_bypass_until > Date.now() ? o.filter_bypass_until : 0);
+const BYPASS_OPTS = '<option value="15">15 min</option><option value="60" selected>1 h</option><option value="240">4 h</option><option value="1440">24 h</option>';
 function accessTags(o) {
   const t = blockInfo(o);
   if (!t.length) return '<span class="muted">libre</span>';
@@ -225,6 +227,10 @@ async function entityPage(token, kind, key) {
         <label class="row sp"><span><b>Bloquer le réseau local</b><br><span class="muted">Noms locaux et réponses vers des adresses privées refusés</span></span>${sw(bl, 'data-acc="lan"')}</label>
         <label class="lbl">Durée du blocage à l'activation<select class="f" id="adur"><option value="0">Jusqu'à ce que je le rétablisse</option><option value="60">1 heure</option><option value="240">4 heures</option><option value="1440">24 heures</option></select></label>
         <div>${bi || bl ? `${accessTags(ent)}` : '<span class="muted">Aucun blocage en cours</span>'}</div>
+        <hr style="border:0;border-top:1px solid var(--line);width:100%">
+        <div><b>Suspendre les filtres</b><br><span class="muted">Toutes les requêtes passent, sans liste ni règle de blocage, puis le filtrage revient tout seul.</span></div>
+        ${bypassUntil(ent) ? `<div class="row"><span class="tag ok">suspendus jusqu'à ${until(bypassUntil(ent))}</span><button class="btn sm" id="bpoff">Reprendre le filtrage</button></div>`
+          : `<div class="row"><select class="f" id="bpdur" style="width:auto" aria-label="Durée">${BYPASS_OPTS}</select><button class="btn" id="bpgo">Suspendre les filtres</button></div>`}
         <p class="note">Le blocage agit au niveau du DNS : il empêche l'appareil de trouver les adresses. Un appareil qui utilise une adresse IP directe ou un autre serveur DNS n'est pas arrêté. Pour une coupure réseau réelle, il faut aussi une règle sur le routeur.</p></div>`;
   }
 
@@ -298,6 +304,13 @@ async function entityPage(token, kind, key) {
 
   main.onclick = guard(async e => {
     const t = e.target.closest('button'); if (!t) return;
+    if (t.id === 'bpgo' || t.id === 'bpoff') {
+      const mins = t.id === 'bpgo' ? +$('#bpdur').value : 0;
+      const id = await saveAccess({ filter_bypass_until: mins ? Date.now() + mins * 60000 : null });
+      toast(mins ? 'Filtres suspendus' : 'Filtrage rétabli');
+      if (!isGroup && key !== id && !DIR.clients.find(c => c.key === key)) { location.hash = keyHref(id); return; }
+      drawHead(); drawAcc(); return;
+    }
     if (t.id === 'livebtn') { live = !live; t.textContent = live ? 'Pause' : 'Reprendre'; $('#livedot').className = 'dot' + (live ? ' up' : ''); $('#livetxt').textContent = live ? 'en direct' : 'en pause'; if (live) drawLog(); return; }
     if (t.id === 'ireg') {
       const r = await api('POST', 'c/clients', { name: $('#in').value, ids: ent.ids });
@@ -373,8 +386,8 @@ pages.access = async function (token) {
   main.innerHTML = `<div class="head"><div><h1>Accès réseau</h1><p>Couper l'accès à Internet, au réseau local, ou aux deux, pour un client ou un groupe. Le blocage peut être temporaire.</p></div></div>
     <div class="card"><div class="row" style="margin-bottom:12px"><input class="f grow" id="aq" type="search" placeholder="Rechercher un client ou un groupe" aria-label="Rechercher">
       <label class="row"><span class="muted">Durée à l'activation</span><select class="f" id="adur" style="width:auto"><option value="0">Jusqu'au rétablissement</option><option value="60">1 heure</option><option value="240">4 heures</option><option value="1440">24 heures</option></select></label></div>
-      <div class="tblwrap"><table><thead><tr><th>Nom</th><th>Type</th><th>Internet</th><th>Réseau local</th><th>État</th><th></th></tr></thead><tbody id="atb"></tbody></table></div>
-      <p class="note" style="margin-top:12px">Le blocage agit au niveau du DNS : l'appareil ne trouve plus les adresses demandées. Un appareil qui se connecte à une adresse IP directe, ou qui utilise un autre serveur DNS (DNS privé d'un téléphone, DoH d'un navigateur), n'est pas arrêté. Pour une coupure réseau réelle, ajoute une règle sur le routeur.</p></div>`;
+      <div class="tblwrap"><table><thead><tr><th>Nom</th><th>Type</th><th>Internet</th><th>Réseau local</th><th>État</th><th>Filtres</th><th></th></tr></thead><tbody id="atb"></tbody></table></div>
+      <p class="note" style="margin-top:12px"><b>Suspendre les filtres</b> laisse passer toutes les requêtes d'un client ou d'un groupe pendant la durée choisie (listes et règles ignorées), puis le filtrage revient tout seul. Les réécritures, zones locales et blocages d'accès restent appliqués.</p><p class="note" style="margin-top:8px">Le blocage agit au niveau du DNS : l'appareil ne trouve plus les adresses demandées. Un appareil qui se connecte à une adresse IP directe, ou qui utilise un autre serveur DNS (DNS privé d'un téléphone, DoH d'un navigateur), n'est pas arrêté. Pour une coupure réseau réelle, ajoute une règle sur le routeur.</p></div>`;
   function rows() {
     const term = q.trim().toLowerCase();
     const items = [
@@ -387,10 +400,15 @@ pages.access = async function (token) {
       return `<tr><td><a href="${link}"><b>${esc(o.label)}</b></a>${o.kind === 'client' && !o.id ? ' <span class="tag">non enregistré</span>' : ''}<div class="mono muted" style="font-size:11px">${esc((o.ids || []).join(', '))}</div></td>
         <td>${o.kind === 'group' ? 'Groupe' : 'Client'}</td>
         <td>${sw(bi, `data-a="internet" data-k="${o.kind}" data-key="${esc(o.key || o.id)}"`)}</td><td>${sw(bl, `data-a="lan" data-k="${o.kind}" data-key="${esc(o.key || o.id)}"`)}</td>
-        <td>${accessTags(o)}</td><td class="row" style="flex-wrap:nowrap"><button class="btn sm" data-all="${o.kind}:${esc(o.key || o.id)}">Tout bloquer</button><button class="btn sm" data-none="${o.kind}:${esc(o.key || o.id)}" ${bi || bl ? '' : 'disabled'}>Rétablir</button></td></tr>`;
-    }).join('') : '<tr><td colspan="6" class="empty">Aucun client ni groupe</td></tr>';
+        <td>${accessTags(o)}</td><td>${bypassCell(o)}</td><td class="row" style="flex-wrap:nowrap"><button class="btn sm" data-all="${o.kind}:${esc(o.key || o.id)}">Tout bloquer</button><button class="btn sm" data-none="${o.kind}:${esc(o.key || o.id)}" ${bi || bl ? '' : 'disabled'}>Rétablir</button></td></tr>`;
+    }).join('') : '<tr><td colspan="7" class="empty">Aucun client ni groupe</td></tr>';
   }
-  async function apply(kind, key, patch) {
+  const bypassCell = o => {
+    const k = `${o.kind}:${esc(o.key || o.id)}`, b = bypassUntil(o);
+    return b ? `<span class="tag ok">suspendus jusqu'à ${until(b)}</span> <button class="btn sm" data-w data-bp="${k}" data-min="0">Reprendre</button>`
+      : `<span class="row" style="flex-wrap:nowrap;gap:4px" data-w><select class="f" data-bpdur style="width:auto" aria-label="Durée">${BYPASS_OPTS}</select><button class="btn sm" data-bp="${k}">Suspendre</button></span>`;
+  };
+  async function apply(kind, key, patch, keepBlock) {
     const minutes = +$('#adur').value;
     let o = kind === 'group' ? DIR.groups.find(g => g.id === key) : DIR.clients.find(c => c.key === key);
     if (!o) return;
@@ -399,7 +417,7 @@ pages.access = async function (token) {
     if (kind === 'client' && !id) { const r = await api('POST', 'c/clients', { name: o.ids[0], ids: o.ids }); id = r.id; }
     const cur = (await get('c/' + col)).find(x => x.id === id) || {};
     const next = { ...cur, ...patch };
-    next.block_until = (next.block_internet || next.block_lan) ? (minutes ? Date.now() + minutes * 60000 : null) : null;
+    if (!keepBlock) next.block_until = (next.block_internet || next.block_lan) ? (minutes ? Date.now() + minutes * 60000 : null) : null;
     delete next.id; delete next.updated_at;
     await api('PUT', `c/${col}/${id}`, next);
     await loadDir(); rows();
@@ -410,6 +428,15 @@ pages.access = async function (token) {
     toast(e.target.checked ? 'Blocage activé' : 'Blocage levé');
   });
   main.onclick = guard(async e => {
+    const bp = e.target.closest('[data-bp]');
+    if (bp) {
+      const [bk, bkey] = bp.dataset.bp.split(/:(.+)/);
+      const sel = bp.parentElement.querySelector('[data-bpdur]');
+      const mins = bp.dataset.min !== undefined ? +bp.dataset.min : +sel.value;
+      await apply(bk, bkey, { filter_bypass_until: mins ? Date.now() + mins * 60000 : null }, true);
+      toast(mins ? `Filtres suspendus pendant ${mins >= 60 ? mins / 60 + ' h' : mins + ' min'}` : 'Filtrage rétabli');
+      return;
+    }
     const t = e.target.closest('[data-all],[data-none]'); if (!t) return;
     const [k, key] = (t.dataset.all || t.dataset.none).split(/:(.+)/);
     await apply(k, key, t.dataset.all ? { block_internet: true, block_lan: true } : { block_internet: false, block_lan: false });

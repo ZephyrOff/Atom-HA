@@ -62,6 +62,9 @@ pub struct ListCfg {
     pub content: String,
     pub enabled: bool,
     pub interval_hours: u64,
+    /// Ids de clients et de groupes auxquels la liste s'applique (vide = tout le monde).
+    pub clients: Vec<String>,
+    pub groups: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -108,6 +111,8 @@ pub struct ClientCfg {
     pub block_internet: bool,
     pub block_lan: bool,
     pub block_until: Option<u64>,
+    /// Le filtrage est suspendu pour ce client jusqu'à cette date (ms).
+    pub filter_bypass_until: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -118,6 +123,7 @@ pub struct GroupCfg {
     pub block_internet: bool,
     pub block_lan: bool,
     pub block_until: Option<u64>,
+    pub filter_bypass_until: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -338,6 +344,8 @@ pub fn seed_defaults(store: &crate::store::Store) {
             content: String::new(),
             enabled: true,
             interval_hours: 12,
+            clients: vec![],
+            groups: vec![],
         }),
     );
 }

@@ -246,9 +246,9 @@ pages.log = async function (token) {
 };
 
 pages.filters = async function (token) {
-  main.innerHTML = `<div class="head"><div><h1>Filtres</h1><p>Listes synchronisées (syntaxe AdGuard, hosts ou liste de domaines) et listes locales. Chaque nœud télécharge ses listes lui-même.</p></div>
+  main.innerHTML = `<div class="head"><div><h1>Listes de filtrage</h1><p>Listes synchronisées (syntaxe AdGuard, hosts ou liste de domaines) et listes locales. Chaque nœud télécharge ses listes lui-même. Une liste peut ne s'appliquer qu'à certains clients ou groupes.</p></div>
     <button class="btn" id="refall">Tout synchroniser</button></div>
-    <div class="card"><h2>Listes</h2><div class="tblwrap"><table><thead><tr><th>Actif</th><th>Nom</th><th>Source</th><th>Règles</th><th>Synchro</th><th>État</th><th></th></tr></thead><tbody id="lt"></tbody></table></div></div>
+    <div class="card"><h2>Listes</h2><div class="tblwrap"><table><thead><tr><th>Actif</th><th>Nom</th><th>S'applique à</th><th>Source</th><th>Règles</th><th>Synchro</th><th>État</th><th></th></tr></thead><tbody id="lt"></tbody></table></div></div>
     <div class="card" id="lform"><h2 id="fh">Ajouter une liste</h2>
       <div class="row" style="margin-bottom:12px"><div class="seg" id="kind"><button class="on" data-k="url">Depuis une URL</button><button data-k="inline">Texte ou fichier</button></div></div>
       <div class="cols">
@@ -257,10 +257,13 @@ pages.filters = async function (token) {
           <label class="lbl" style="margin-top:10px">Synchronisation<select class="f" id="li"><option value="1">Toutes les heures</option><option value="6">Toutes les 6 heures</option><option value="12" selected>Toutes les 12 heures</option><option value="24">Tous les jours</option><option value="168">Toutes les semaines</option></select></label></div>
           <div id="fi" hidden><label class="lbl">Règles<textarea class="f" id="lc" style="min-height:160px" placeholder="||tracker.exemple.com^&#10;0.0.0.0 pub.exemple.net"></textarea></label>
           <div class="row" style="margin-top:8px"><input type="file" id="lf" accept=".txt,.list,text/plain"><span class="muted">Le contenu du fichier est lu ici, puis enregistré dans la configuration.</span></div></div>
+          <div class="row" style="align-items:flex-start"><span class="muted" style="padding-top:8px">S'applique à</span><div id="lscope" class="grow"></div></div>
           <div class="row"><button class="btn pri" id="ladd">Ajouter</button><button class="btn" id="lcancel" hidden>Annuler</button></div></div>
-        <div class="note">Une liste enregistrée comme texte ou fichier est répliquée sur tous les nœuds. Une liste distante n'enregistre que son adresse : si le téléchargement échoue, la dernière copie valide reste active.</div>
+        <div class="note">Sans limite, une liste s'applique à tous les appareils. Limitée à des clients ou des groupes, elle ne filtre que leurs requêtes : utile pour un filtre « enfants » plus strict, ou une liste de pubs seulement pour la TV. Les règles personnalisées, elles, valent pour tout le monde. Une liste enregistrée comme texte ou fichier est répliquée sur tous les nœuds. Une liste distante n'enregistre que son adresse : si le téléchargement échoue, la dernière copie valide reste active.</div>
       </div></div>`;
-  let kind = 'url', editing = null, lists = [];
+  let kind = 'url', editing = null, lists = [], scope = null;
+  await loadDir();
+  scope = mountScope($('#lscope'), {});
   async function draw() {
     let meta; [lists, meta] = await Promise.all([get('c/lists'), get('lists/status')]);
     if (token !== routeToken) return;
@@ -271,12 +274,12 @@ pages.filters = async function (token) {
         : m.error ? `<span class="tag warn" title="${esc(m.error)}">échec${m.updated_at ? ' · ancienne copie' : ''}</span>`
         : m.updated_at ? '<span class="tag ok">à jour</span>' : '<span class="tag">en attente</span>';
       const count = l.kind === 'inline' ? '' : (m.rules ? num(m.rules) : '–');
-      return `<tr><td>${sw(l.enabled, `data-tog="${l.id}"`)}</td><td>${esc(l.name)}</td>
+      return `<tr><td>${sw(l.enabled, `data-tog="${l.id}"`)}</td><td>${esc(l.name)}</td><td>${scopeTags(l)}</td>
         <td class="mono muted" title="${esc(l.url)}">${l.kind === 'url' ? esc(l.url.replace(/^https?:\/\//, '').slice(0, 44)) : 'texte local'}</td>
         <td>${count}${m.unsupported ? ` <span class="muted" title="Règles ignorées : modificateurs non gérés">(${num(m.unsupported)} ignorées)</span>` : ''}</td>
         <td>${l.kind === 'url' ? ago(m.updated_at) : ago(l.updated_at)}</td><td>${st}</td>
         <td class="row"><button class="btn sm" data-edit="${l.id}">Modifier</button>${l.kind === 'url' ? `<button class="btn sm" data-ref="${l.id}">Synchroniser</button>` : ''}<button class="btn sm danger" data-del="${l.id}">Supprimer</button></td></tr>`;
-    }).join('') : '<tr><td colspan="7" class="empty">Aucune liste</td></tr>';
+    }).join('') : '<tr><td colspan="8" class="empty">Aucune liste</td></tr>';
   }
   function setKind(k) {
     kind = k;
@@ -286,13 +289,13 @@ pages.filters = async function (token) {
   function resetForm() {
     editing = null;
     ['ln', 'lu', 'lc'].forEach(i => ($('#' + i).value = ''));
-    $('#li').value = '12'; $('#fh').textContent = 'Ajouter une liste'; $('#ladd').textContent = 'Ajouter';
+    scope.set({}); $('#li').value = '12'; $('#fh').textContent = 'Ajouter une liste'; $('#ladd').textContent = 'Ajouter';
     $('#lcancel').hidden = true; $('#kind').hidden = false; setKind('url');
   }
   function startEdit(id) {
     const l = lists.find(x => x.id === id); if (!l) return;
     editing = id; setKind(l.kind);
-    $('#ln').value = l.name; $('#lu').value = l.url || ''; $('#lc').value = l.content || '';
+    $('#ln').value = l.name; $('#lu').value = l.url || ''; $('#lc').value = l.content || ''; scope.set(l);
     if (![...$('#li').options].some(o => o.value === String(l.interval_hours))) $('#li').add(new Option(`Toutes les ${l.interval_hours} h`, l.interval_hours));
     $('#li').value = String(l.interval_hours);
     $('#fh').textContent = 'Modifier la liste'; $('#ladd').textContent = 'Enregistrer';
@@ -303,7 +306,7 @@ pages.filters = async function (token) {
   $('#lcancel').onclick = resetForm;
   $('#lf').onchange = e => { const f = e.target.files[0]; if (f) { f.text().then(t => { $('#lc').value = t; if (!$('#ln').value) $('#ln').value = f.name; }); } };
   $('#ladd').onclick = guard(async () => {
-    const body = { name: $('#ln').value, kind, enabled: true };
+    const body = { name: $('#ln').value, kind, enabled: true, ...scope.get() };
     if (kind === 'url') { body.url = $('#lu').value.trim(); body.interval_hours = +$('#li').value; } else body.content = $('#lc').value;
     if (editing) {
       const old = lists.find(x => x.id === editing);
@@ -681,6 +684,7 @@ async function route() {
   const r = pages[name] ? name : 'dashboard';
   const navKey = r === 'client' || r === 'group' ? 'clients' : r;
   $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.r === navKey));
+  $('#side').classList.remove('open');
   const token = ++routeToken;
   try { await pages[r](token, param); } catch (e) { if (token === routeToken) main.innerHTML = `<div class="card"><h2>Erreur</h2><p>${esc(e.message)}</p></div>`; }
   nodeChip();

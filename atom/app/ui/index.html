@@ -12,31 +12,43 @@
 <div id="robanner" class="robanner" hidden>Accès en lecture seule : tu peux tout consulter, rien ne se modifie.</div>
 <div class="shell">
   <aside class="side" id="side">
-    <div class="brand">
-      <img src="logo.png" width="30" height="30" alt="">
-      <b>Atom</b>
+    <div class="sidetop">
+      <div class="brand">
+        <img src="logo.png" width="30" height="30" alt="">
+        <b>Atom</b>
+      </div>
+      <button class="btn menubtn" id="menubtn" type="button" aria-expanded="false" aria-controls="sidebody">☰ Menu</button>
     </div>
-    <button class="btn searchbtn" id="searchbtn" type="button" aria-label="Rechercher">🔍 Rechercher <kbd>/</kbd></button>
-    <nav id="nav">
-      <a href="#dashboard" data-r="dashboard">Tableau de bord</a>
-      <a href="#clients" data-r="clients">Clients</a>
-      <a href="#access" data-r="access">Accès réseau</a>
-      <a href="#log" data-r="log">Journal</a>
-      <a href="#filters" data-r="filters">Filtres</a>
-      <a href="#cache" data-r="cache">Cache</a>
-      <a href="#dns" data-r="dns">Paramètres DNS</a>
-      <a href="#rewrites" data-r="rewrites">Réécritures</a>
-      <a href="#rules" data-r="rules">Règles personnalisées</a>
-      <a href="#records" data-r="records">Enregistrements</a>
-      <a href="#cluster" data-r="cluster">Cluster</a>
-      <a href="#health" data-r="health">Santé</a>
-      <a href="#history" data-r="history">Historique</a>
-      <a href="#certs" data-r="certs">Certificats</a>
-      <a href="#security" data-r="security">Sécurité</a>
-    </nav>
-    <div class="nodechip" id="nodechip">…</div>
-    <button class="btn" id="theme" type="button"></button>
-    <button class="btn" id="logout" type="button">Se déconnecter</button>
+    <div class="sidebody" id="sidebody">
+      <button class="btn searchbtn" id="searchbtn" type="button" aria-label="Rechercher">🔍 Rechercher <kbd>/</kbd></button>
+      <nav id="nav" aria-label="Navigation principale">
+        <div class="navgrp">Surveillance</div>
+        <a href="#dashboard" data-r="dashboard">Tableau de bord</a>
+        <a href="#log" data-r="log">Journal</a>
+        <a href="#health" data-r="health">Santé</a>
+        <div class="navgrp">Appareils</div>
+        <a href="#clients" data-r="clients">Clients et groupes</a>
+        <a href="#access" data-r="access">Accès réseau</a>
+        <div class="navgrp">Filtrage</div>
+        <a href="#filters" data-r="filters">Listes de filtrage</a>
+        <a href="#rules" data-r="rules">Règles personnalisées</a>
+        <div class="navgrp">Résolution DNS</div>
+        <a href="#dns" data-r="dns">Upstreams et réglages</a>
+        <a href="#rewrites" data-r="rewrites">Réécritures</a>
+        <a href="#records" data-r="records">Enregistrements</a>
+        <a href="#cache" data-r="cache">Cache</a>
+        <div class="navgrp">Administration</div>
+        <a href="#cluster" data-r="cluster">Cluster</a>
+        <a href="#history" data-r="history">Historique et sauvegardes</a>
+        <a href="#certs" data-r="certs">Certificats</a>
+        <a href="#security" data-r="security">Sécurité</a>
+      </nav>
+      <div class="nodechip" id="nodechip">…</div>
+      <div class="sidetools">
+        <button class="btn" id="theme" type="button"></button>
+        <button class="btn" id="logout" type="button">Se déconnecter</button>
+      </div>
+    </div>
   </aside>
   <main id="main" tabindex="-1"></main>
   <div id="sov" class="overlay" hidden>

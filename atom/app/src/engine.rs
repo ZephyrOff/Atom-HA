@@ -63,6 +63,7 @@ pub struct AccessEntry {
     pub block_internet: bool,
     pub block_lan: bool,
     pub block_until: Option<u64>,
+    pub bypass_until: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -90,6 +91,9 @@ pub struct ZoneAnswer {
 pub struct Engine {
     pub settings: Settings,
     pub lists: Vec<Arc<ParsedList>>,
+    /// Portée de chaque liste (même ordre que `lists`) : (clients, groupes), vides = tout le monde.
+    list_scopes: Vec<(Vec<String>, Vec<String>)>,
+    scoped_lists: bool,
     /// Règles désactivées par `$badfilter`, toutes listes confondues.
     pub disabled: HashSet<String>,
     /// Signature de ce qui change le contenu du cache (upstreams, DNSSEC) : le cache n'est vidé que si elle change.
@@ -118,6 +122,8 @@ impl Engine {
         Self {
             settings: Settings::default(),
             lists: vec![],
+            list_scopes: vec![],
+            scoped_lists: false,
             disabled: HashSet::new(),
             cache_sig: String::new(),
             rw_exact: HashMap::new(),
@@ -141,6 +147,27 @@ impl Engine {
             .iter()
             .find(|(d, until)| *until > now && (name == d || name.strip_suffix(d.as_str()).map_or(false, |p| p.ends_with('.'))))
             .map(|(d, _)| d.as_str())
+    }
+
+    /// Listes qui s'appliquent à ce client : celles sans portée, et celles qui le visent (lui ou son groupe).
+    pub fn lists_for(&self, id: &Identity) -> std::borrow::Cow<'_, [Arc<ParsedList>]> {
+        if !self.scoped_lists {
+            return std::borrow::Cow::Borrowed(&self.lists);
+        }
+        std::borrow::Cow::Owned(
+            self.lists.iter().zip(&self.list_scopes).filter(|(_, (c, g))| id.in_scope(c, g)).map(|(l, _)| l.clone()).collect(),
+        )
+    }
+
+    /// Nom du client ou du groupe dont le filtrage est suspendu en ce moment.
+    pub fn bypass(&self, id: &Identity, now: u64) -> Option<String> {
+        let live = |e: &AccessEntry| e.bypass_until.map_or(false, |t| t > now);
+        if let Some(c) = id.client.as_ref().and_then(|cid| self.clients.iter().find(|c| &c.id == cid)) {
+            if live(&c.access) {
+                return Some(c.access.name.clone());
+            }
+        }
+        id.group.as_ref().and_then(|gid| self.groups.get(gid)).filter(|g| live(g)).map(|g| g.name.clone())
     }
 
     /// Nom du client enregistré, pour les règles `$client='Nom'`.
@@ -290,6 +317,7 @@ impl Engine {
 
         // --- listes ---
         let mut lists: Vec<Arc<ParsedList>> = Vec::new();
+        let mut list_scopes: Vec<(Vec<String>, Vec<String>)> = Vec::new();
         let mut keep: HashSet<String> = HashSet::new();
         let hash = |s: &str| {
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -313,6 +341,7 @@ impl Engine {
             };
             keep.insert("custom".into());
             lists.push(parsed);
+            list_scopes.push((vec![], vec![]));
         }
         for (id, v, _) in store.list("lists") {
             let Ok(cfg) = serde_json::from_value::<ListCfg>(v) else { continue };
@@ -353,6 +382,7 @@ impl Engine {
                 }
             };
             lists.push(parsed);
+            list_scopes.push((cfg.clients.clone(), cfg.groups.clone()));
         }
         app.parse_cache.lock().retain(|k, _| keep.contains(k));
 
@@ -451,7 +481,7 @@ impl Engine {
             if let Ok(g) = serde_json::from_value::<GroupCfg>(v) {
                 groups.insert(
                     id,
-                    AccessEntry { name: g.name, block_internet: g.block_internet, block_lan: g.block_lan, block_until: g.block_until },
+                    AccessEntry { name: g.name, block_internet: g.block_internet, block_lan: g.block_lan, block_until: g.block_until, bypass_until: g.filter_bypass_until },
                 );
             }
         }
@@ -462,7 +492,7 @@ impl Engine {
                     id,
                     set: ClientSet::parse(&c.ids),
                     group: c.group,
-                    access: AccessEntry { name: c.name, block_internet: c.block_internet, block_lan: c.block_lan, block_until: c.block_until },
+                    access: AccessEntry { name: c.name, block_internet: c.block_internet, block_lan: c.block_lan, block_until: c.block_until, bypass_until: c.filter_bypass_until },
                 });
             }
         }
@@ -474,14 +504,39 @@ impl Engine {
             .map(|t| (t.domain, t.until))
             .collect();
 
-        let disabled = crate::filter::disabled_rules(&lists);
-        Engine { settings, lists, disabled, cache_sig, rw_exact, rw_wild, zones, zone_serial, zrecs, zwild, znames, ptr, upstreams, clients, groups, temp_allow }
+        // Un `$badfilter` ne désactive une règle pour tout le monde que s'il vient d'une liste sans portée.
+        let unscoped: Vec<Arc<ParsedList>> =
+            lists.iter().zip(&list_scopes).filter(|(_, (c, g))| c.is_empty() && g.is_empty()).map(|(l, _)| l.clone()).collect();
+        let disabled = crate::filter::disabled_rules(&unscoped);
+        let scoped_lists = list_scopes.iter().any(|(c, g)| !(c.is_empty() && g.is_empty()));
+        Engine { settings, lists, list_scopes, scoped_lists, disabled, cache_sig, rw_exact, rw_wild, zones, zone_serial, zrecs, zwild, znames, ptr, upstreams, clients, groups, temp_allow }
     }
 }
 
 #[cfg(test)]
 mod temp_tests {
     use super::*;
+
+    #[test]
+    fn list_scope_and_bypass() {
+        let mut e = Engine::empty();
+        e.lists = vec![Arc::new(ParsedList::parse("a", "||x.com^")), Arc::new(ParsedList::parse("b", "||y.com^"))];
+        e.list_scopes = vec![(vec![], vec![]), (vec!["c1".into()], vec![])];
+        e.scoped_lists = true;
+        let anon = Identity::default();
+        let c1 = Identity { client: Some("c1".into()), group: None };
+        assert_eq!(e.lists_for(&anon).len(), 1);
+        assert_eq!(e.lists_for(&c1).len(), 2);
+        e.clients.push(ClientEntry {
+            id: "c1".into(),
+            set: ClientSet::default(),
+            group: String::new(),
+            access: AccessEntry { name: "Léo".into(), bypass_until: Some(2000), ..Default::default() },
+        });
+        assert_eq!(e.bypass(&c1, 1000).as_deref(), Some("Léo"));
+        assert!(e.bypass(&c1, 3000).is_none());
+        assert!(e.bypass(&anon, 1000).is_none());
+    }
 
     #[test]
     fn temp_allow_matches_domain_and_subdomains_until_expiry() {

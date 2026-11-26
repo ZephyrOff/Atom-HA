@@ -637,7 +637,7 @@ async fn put_value(app: &Arc<App>, col: &str, id: &str, body: Value, actor: &str
         o.remove("updated_at");
     }
     let v = model::validate(col, body).map_err(bad)?;
-    if col == "rewrites" || col == "records" {
+    if col == "rewrites" || col == "records" || col == "lists" {
         for (field, target) in [("clients", "clients"), ("groups", "groups")] {
             for sid in v.get(field).and_then(|x| x.as_array()).into_iter().flatten().filter_map(|x| x.as_str()) {
                 if app.store.get(target, sid).is_none() {
@@ -697,7 +697,7 @@ async fn remove(State(app): State<Arc<App>>, Extension(actor): Extension<Actor>,
 /// Retire un client ou un groupe supprimé des portées. Une configuration qui n'avait que lui
 /// pour portée est supprimée, plutôt que de devenir générale par erreur.
 fn strip_scope(app: &Arc<App>, kind: &str, id: &str, actor: &str) {
-    for col in ["rewrites", "records"] {
+    for col in ["rewrites", "records", "lists"] {
         for (oid, mut v, _) in app.store.list(col) {
             let Some(arr) = v.get_mut(kind).and_then(|x| x.as_array_mut()) else { continue };
             let before = arr.len();
@@ -707,7 +707,13 @@ fn strip_scope(app: &Arc<App>, kind: &str, id: &str, actor: &str) {
             }
             let empty = |f: &str| v.get(f).and_then(|x| x.as_array()).map_or(true, |a| a.is_empty());
             if empty("clients") && empty("groups") {
-                app.store.delete_as(col, &oid, actor);
+                if col == "lists" {
+                    // Une liste qui n'avait que lui pour portée est désactivée, pas étendue à tout le monde.
+                    v["enabled"] = json!(false);
+                    app.store.put_as(col, &oid, v, actor);
+                } else {
+                    app.store.delete_as(col, &oid, actor);
+                }
             } else {
                 app.store.put_as(col, &oid, v, actor);
             }
@@ -837,7 +843,10 @@ pub async fn check(State(app): State<Arc<App>>, Json(r): Json<CheckReq>) -> Res 
     let ip: std::net::IpAddr = r.client.as_deref().and_then(|c| c.trim().parse().ok()).unwrap_or_else(|| "0.0.0.0".parse().unwrap());
     let qtype = r.qtype.as_deref().and_then(dnswire::type_from_name).unwrap_or(dnswire::T_A);
     let fctx = filter::Ctx { ip, client_name: eng.client_name(&ident), qtype };
-    match filter::check(&eng.lists, &name, &fctx, &eng.disabled) {
+    if let Some(who) = eng.bypass(&ident, now_ms()) {
+        return Ok(Json(json!({"result": "allowed", "detail": format!("le filtrage est suspendu pour {who}")})));
+    }
+    match filter::check(&eng.lists_for(&ident), &name, &fctx, &eng.disabled) {
         Some(h) => {
             let result = match &h.kind {
                 HitKind::Block => "blocked",
@@ -1032,6 +1041,7 @@ async fn clients_list(State(app): State<Arc<App>>) -> Res {
         clients.push(json!({
             "id": id, "key": id, "name": c.name, "ids": c.ids, "group": c.group, "notes": c.notes,
             "block_internet": c.block_internet, "block_lan": c.block_lan, "block_until": c.block_until,
+            "filter_bypass_until": c.filter_bypass_until,
             "queries": a.queries, "blocked": a.blocked, "last_seen": a.last, "ips": a.ips,
         }));
     }

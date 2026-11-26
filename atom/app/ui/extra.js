@@ -26,6 +26,7 @@ async function showWhy(r, host, names) {
   const [rt, rc] = RESULT[r.result] || [r.result, ''];
   const net = r.list === 'Accès réseau';
   const temp = r.list === 'Autorisation temporaire';
+  const susp = r.list === 'Filtrage suspendu';
   let cause;
   if (r.result === 'blocked') {
     cause = net ? `Le client est soumis à un blocage d'accès réseau : <b>${esc(r.reason)}</b>. <a href="#access">Voir les accès réseau</a>.`
@@ -34,6 +35,8 @@ async function showWhy(r, host, names) {
     cause = `Réponse réécrite : <b class="mono">${esc(r.reason)}</b>${r.list ? ` (liste <b>${esc(r.list)}</b>)` : ''}.`;
   } else if (r.result === 'zone') {
     cause = 'Répondue par une zone locale (enregistrements DNS d\'Atom).';
+  } else if (susp) {
+    cause = `Autorisée parce que le filtrage est suspendu (${esc(r.reason)}). <a href="#access">Voir les accès réseau</a>.`;
   } else if (temp) {
     cause = `Autorisée parce que le domaine est autorisé temporairement (<span class="mono">${esc(r.reason)}</span>).`;
   } else if (r.result === 'allowed' && r.reason) {
@@ -201,3 +204,19 @@ pages.health = async function (token) {
 get('auth/me').then(m => {
   if (m.readonly) { document.body.classList.add('ro'); $('#robanner').hidden = false; }
 }).catch(() => {});
+
+// ---------- menu sur petit écran ----------
+
+{
+  const side = $('#side'), btn = $('#menubtn');
+  const set = open => {
+    side.classList.toggle('open', open);
+    btn.setAttribute('aria-expanded', String(open));
+    btn.textContent = open ? '✕ Fermer' : '☰ Menu';
+  };
+  btn.onclick = () => set(!side.classList.contains('open'));
+  $('#nav').addEventListener('click', () => set(false));
+  $('#searchbtn').addEventListener('click', () => set(false));
+  window.addEventListener('hashchange', () => set(false));
+  matchMedia('(min-width: 821px)').addEventListener('change', e => { if (e.matches) set(false); });
+}
