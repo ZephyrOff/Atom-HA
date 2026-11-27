@@ -419,12 +419,13 @@ pages.filters = async function (token) {
 
 pages.dns = async function (token) {
   main.innerHTML = `<div class="head"><div><h1>Paramètres DNS</h1><p>Les upstreams sont essayés dans l'ordre de la liste. Glisse une ligne ou utilise les flèches pour changer la priorité.</p></div></div>
-    <div class="tabsbar" id="dtabs" role="tablist"><button data-t="up" role="tab">Upstreams</button><button data-t="cache" role="tab">Cache</button><button data-t="block" role="tab">Blocage</button><button data-t="dnssec" role="tab">DNSSEC</button></div>
+    <div class="tabsbar" id="dtabs" role="tablist"><button data-tab="up" role="tab">Upstreams</button><button data-tab="cache" role="tab">Cache</button><button data-tab="block" role="tab">Blocage</button><button data-tab="dnssec" role="tab">DNSSEC</button></div>
     <div data-p="up">
     <div class="card"><h2>Upstreams <span class="row"><div class="seg" id="mode"><button data-m="ordered">Par priorité</button><button data-m="parallel">En parallèle</button></div></span></h2>
       <div class="tblwrap"><table><thead><tr><th></th><th>Priorité</th><th>Actif</th><th>État</th><th>Nom</th><th>Adresse</th><th>Latence</th><th></th></tr></thead><tbody id="ut"></tbody></table></div>
       <p class="note" style="margin-top:12px" id="modenote"></p></div>
-    <div class="card" style="margin-top:14px"><h2 id="uh">Ajouter un upstream</h2>
+    <div class="row" style="margin-top:14px"><button class="btn pri" id="uadd">+ Ajouter un upstream</button></div>
+    <div class="card" id="uform" style="margin-top:14px" hidden><h2 id="uh">Ajouter un upstream</h2>
       <div class="cols"><div class="stack">
         <label class="lbl">Nom<input class="f" id="un" placeholder="Mon résolveur"></label>
         <label class="lbl">Adresse<input class="f" id="ua" placeholder="1.1.1.1 · tls://dns.quad9.net · https://dns.google/dns-query"></label>
@@ -451,11 +452,11 @@ pages.dns = async function (token) {
     try { tab = sessionStorage.getItem('atom-dns-tab') || 'up'; } catch { /* ignoré */ }
     const show = t => {
       tab = t;
-      $$('#dtabs button').forEach(b => { b.classList.toggle('on', b.dataset.t === t); b.setAttribute('aria-selected', String(b.dataset.t === t)); });
+      $$('#dtabs button').forEach(b => { b.classList.toggle('on', b.dataset.tab === t); b.setAttribute('aria-selected', String(b.dataset.tab === t)); });
       $$('[data-p]').forEach(p => (p.hidden = p.dataset.p !== t));
       try { sessionStorage.setItem('atom-dns-tab', t); } catch { /* ignoré */ }
     };
-    $('#dtabs').onclick = e => { const b = e.target.closest('button'); if (b) show(b.dataset.t); };
+    $('#dtabs').onclick = e => { const b = e.target.closest('button'); if (b) show(b.dataset.tab); };
     show(tab);
   }
   let ups = [], health = {}, editing = null, set = {};
@@ -490,7 +491,8 @@ pages.dns = async function (token) {
   function form() {
     return { name: $('#un').value, address: $('#ua').value, bootstrap: $('#ub').value, domains: $('#ud').value.split(',').map(s => s.trim()).filter(Boolean), backup: $('#ubk').checked };
   }
-  function resetForm() { editing = null; $('#ubk').checked = false; ['un', 'ua', 'ub', 'ud'].forEach(i => ($('#' + i).value = '')); $('#usave').textContent = 'Ajouter'; $('#uh').textContent = 'Ajouter un upstream'; $('#ucancel').hidden = true; }
+  function resetForm() { editing = null; $('#ubk').checked = false; ['un', 'ua', 'ub', 'ud'].forEach(i => ($('#' + i).value = '')); $('#usave').textContent = 'Ajouter'; $('#uh').textContent = 'Ajouter un upstream'; $('#ucancel').hidden = true; $('#ures').textContent = ''; $('#uform').hidden = true; $('#uadd').hidden = false; }
+  $('#uadd').onclick = () => { $('#uform').hidden = false; $('#uadd').hidden = true; $('#un').focus(); };
   $('#ucancel').onclick = resetForm;
   $('#utest').onclick = guard(async () => {
     $('#ures').textContent = 'Test en cours…';
@@ -526,7 +528,7 @@ pages.dns = async function (token) {
     } else if (t.dataset.edit) {
       const u = ups.find(x => x.id === t.dataset.edit); editing = u.id;
       $('#un').value = u.name; $('#ua').value = u.address; $('#ub').value = u.bootstrap; $('#ud').value = u.domains.join(', '); $('#ubk').checked = !!u.backup;
-      $('#usave').textContent = 'Enregistrer'; $('#uh').textContent = 'Modifier un upstream'; $('#ucancel').hidden = false; $('#un').focus();
+      $('#usave').textContent = 'Enregistrer'; $('#uh').textContent = 'Modifier un upstream'; $('#ucancel').hidden = false; $('#uform').hidden = false; $('#uadd').hidden = true; $('#un').focus();
     } else if (t.dataset.del) {
       if (t.dataset.sure !== '1') { t.dataset.sure = '1'; t.textContent = 'Confirmer ?'; setTimeout(() => { t.dataset.sure = ''; t.textContent = 'Supprimer'; }, 3000); return; }
       await api('DELETE', `c/upstreams/${t.dataset.del}`); await load(); draw();
