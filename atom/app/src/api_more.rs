@@ -244,20 +244,79 @@ async fn health(State(app): State<Arc<App>>) -> Res {
             "id": p.id, "name": name, "url": p.url, "ok": st.ok, "last_ok": st.last_ok, "latency_ms": st.latency_ms,
             "version": st.version, "skew_ms": st.skew_ms, "cert_expires": st.cert_expires, "dns_ok": st.dns_ok,
             "behind_ops": st.behind_ops, "last_error": st.last_error,
+            "uptime_s": st.uptime_s, "rules_loaded": st.rules_loaded, "cache_entries": st.cache_entries,
         }));
     }
     problems.sort_by_key(|p| if p["level"] == "bad" { 0 } else { 1 });
+    let detail = self_detail(&app, &me_id);
     let cert_log: Vec<Value> = app.cert_log.lock().iter().rev().map(|(t, m)| json!({"ts": t, "text": m})).collect();
     Ok(Json(json!({
         "self": {
             "id": me_id, "name": me_name, "version": VERSION, "uptime_s": app.started.elapsed().as_secs(), "dns_ok": dns_ok,
             "cert_expires": node_cert, "ca_expires": ca_cert, "web_expires": web_cert, "cluster_mode": mode,
             "web_auto": web_generated, "node_auto": mode == "ca" || mode == "selfsigned",
+            "detail": detail.0,
         },
+        "upstreams": detail.1,
+        "lists": detail.2,
         "peers": plist,
         "problems": problems,
         "cert_log": cert_log,
     })))
+}
+
+/// Informations détaillées sur ce nœud : (réglages et compteurs, upstreams, listes).
+fn self_detail(app: &Arc<App>, me_id: &str) -> (Value, Value, Value) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let eng = app.engine.load();
+    let st = app.qlog.stats(me_id, None);
+    let (web_enabled, web_port, redirect, tls_mode) = {
+        let n = app.node.lock();
+        (n.tls.web_enabled, n.tls.web_port, n.tls.redirect_http, n.tls.cluster_mode.clone())
+    };
+    let objects: serde_json::Map<String, Value> = model::COLLECTIONS.iter().map(|c| (c.to_string(), json!(app.store.list(c).len()))).collect();
+    let custom_rules = app.store.get("rules", "main").and_then(|v| v["text"].as_str().map(|t| t.lines().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with(['!', '#'])).count())).unwrap_or(0);
+    let health = app.health.lock().clone();
+    let mut ups: Vec<Value> = app
+        .store
+        .list("upstreams")
+        .into_iter()
+        .map(|(id, v, _)| {
+            let h = health.get(&id).cloned().unwrap_or_default();
+            json!({
+                "id": id, "name": v["name"], "address": v["address"], "enabled": v["enabled"], "backup": v["backup"], "order": v["order"],
+                "up": h.up, "latency_ms": h.latency_ms, "ok_count": h.ok_count, "fail_count": h.fail_count, "last_error": h.last_error, "last_check": h.last_check,
+            })
+        })
+        .collect();
+    ups.sort_by(|a, b| a["order"].as_f64().partial_cmp(&b["order"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+    let meta = app.lists_meta.lock().clone();
+    let lists: Vec<Value> = app
+        .store
+        .list("lists")
+        .into_iter()
+        .map(|(id, v, _)| {
+            let m = meta.get(&id).cloned().unwrap_or_default();
+            let scoped = v["clients"].as_array().map_or(0, |a| a.len()) + v["groups"].as_array().map_or(0, |a| a.len());
+            json!({
+                "id": id, "name": v["name"], "kind": v["kind"], "enabled": v["enabled"], "rules": m.rules, "unsupported": m.unsupported,
+                "updated_at": m.updated_at, "error": m.error, "scoped": scoped,
+            })
+        })
+        .collect();
+    let detail = json!({
+        "dns_listen": app.cfg.dns_listen, "http_listen": app.cfg.http_listen, "dns_error": app.dns_error.lock().clone(),
+        "filtering_enabled": eng.settings.filtering_enabled, "paused_until": eng.settings.pause_until.filter(|t| *t > now_ms()),
+        "block_mode": eng.settings.block_mode, "dnssec": eng.settings.dnssec, "upstream_mode": eng.settings.upstream_mode,
+        "rules_loaded": eng.lists.iter().map(|l| l.count).sum::<usize>(), "custom_rules": custom_rules,
+        "queries_24h": st.total, "blocked_24h": st.blocked, "avg_ms": st.avg_ms, "log_entries": app.qlog.count(),
+        "cache": {"entries": app.cache.lock().len(), "hits": app.cache_hits.load(Relaxed), "misses": app.cache_misses.load(Relaxed), "capacity": eng.settings.cache_size, "enabled": eng.settings.cache_enabled},
+        "tls": {"cluster_mode": tls_mode, "web_enabled": web_enabled, "web_port": web_port, "listening": *app.tls_listening.lock(), "redirect_http": redirect, "error": app.tls_error.lock().clone()},
+        "auth": {"sessions": app.auth.sessions(None).len(), "locked": app.auth.locked_list().len()},
+        "store": {"objects": objects, "tombstones": app.store.tombstone_count(), "conflicts": app.store.conflicts().iter().filter(|c| !c.resolved).count()},
+        "temp_allow": app.store.list("tempallow").iter().filter(|(_, v, _)| v["until"].as_u64().map_or(false, |u| u > now_ms())).count(),
+    });
+    (detail, Value::Array(ups), Value::Array(lists))
 }
 
 // ---------- tâches de fond ----------

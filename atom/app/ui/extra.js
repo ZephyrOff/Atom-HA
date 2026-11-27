@@ -71,32 +71,97 @@ async function showWhy(r, host, names) {
 
 // ---------- santé du cluster ----------
 
+const dur = s => {
+  if (!s && s !== 0) return '–';
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${d} j ${h} h` : h ? `${h} h ${m} min` : `${m} min`;
+};
+const yesno = (v, a = 'oui', b = 'non') => v ? `<span class="tag ok">${a}</span>` : `<span class="tag">${b}</span>`;
+
 pages.health = async function (token) {
-  main.innerHTML = `<div class="head"><div><h1>Santé du cluster</h1><p>Ce qui demande de l'attention : nœuds injoignables, versions différentes, horloges décalées, certificats proches de l'échéance.</p></div></div><div id="hbody"></div>`;
+  main.innerHTML = `<div class="head"><div><h1>Santé</h1><p>L'état de ce nœud et des autres : ce qui demande de l'attention d'abord, puis le détail des nœuds, des upstreams, des listes, des certificats et du stockage.</p></div></div><div id="hbody"></div>`;
   async function draw() {
     const h = await get('health');
     if (token !== routeToken) return;
-    const me = h.self;
+    const me = h.self, d = me.detail, now = Date.now();
+    const bad = h.problems.filter(p => p.level === 'bad').length, warn = h.problems.length - bad;
     const probs = h.problems.length
       ? `<div class="stack">${h.problems.map(p => `<div class="card prob ${p.level}"><span class="tag ${p.level === 'bad' ? 'bad' : 'warn'}">${p.level === 'bad' ? 'Important' : 'À surveiller'}</span> <b>${esc(p.scope)}</b> · ${esc(p.text)}</div>`).join('')}</div>`
       : '<div class="card prob ok"><span class="tag ok">Tout va bien</span> Tous les nœuds répondent, avec la même version et des certificats valides.</div>';
-    const skew = ms => { const a = Math.abs(ms); return a < 1000 ? '< 1 s' : `${(ms > 0 ? '+' : '−')}${Math.round(a / 1000)} s`; };
-    const rows = [`<tr><td><b>${esc(me.name)}</b> <span class="tag acc">ce nœud</span></td><td><span class="dot up"></span>local</td><td class="mono">${esc(me.version)}</td><td>–</td><td>–</td><td>–</td><td>–</td><td>${me.dns_ok ? '<span class="tag ok">actif</span>' : '<span class="tag bad">arrêté</span>'}</td><td>${certTag(me.cert_expires)}</td></tr>`]
+    const online = 1 + h.peers.filter(p => p.ok).length, total = 1 + h.peers.length;
+    const upOn = h.upstreams.filter(u => u.enabled), upOk = upOn.filter(u => u.up === true).length;
+    const lsOn = h.lists.filter(l => l.enabled), lsErr = lsOn.filter(l => l.error).length;
+    const days = [me.cert_expires, me.cluster_mode === 'pki' ? null : me.ca_expires, me.web_expires].filter(Boolean).map(daysTo);
+    const minDays = days.length ? Math.min(...days) : null;
+    const tile = (cls, label, val, sub) => `<div class="tile ${cls}"><small>${label}</small><strong>${val}</strong><span>${sub}</span></div>`;
+    const sum = `<div class="hsum">
+      ${tile(online === total ? 'good' : 'warn', 'Nœuds en ligne', `${online}/${total}`, total > 1 ? 'cluster' : 'nœud seul')}
+      ${tile(!upOn.length || upOk === 0 ? 'bad' : upOk < upOn.length ? 'warn' : 'good', 'Upstreams', `${upOk}/${upOn.length}`, 'joignables')}
+      ${tile(lsErr ? 'warn' : 'good', 'Listes', `${lsOn.length - lsErr}/${lsOn.length}`, lsErr ? `${lsErr} en échec` : 'à jour')}
+      ${tile('', 'Requêtes (24 h)', num(d.queries_24h), `${d.queries_24h ? (d.blocked_24h / d.queries_24h * 100).toFixed(1).replace('.', ',') : 0} % bloquées`)}
+      ${tile(minDays == null ? '' : minDays < 7 ? 'bad' : minDays < 30 ? 'warn' : 'good', 'Prochaine échéance', minDays == null ? '–' : minDays + ' j', 'certificats')}</div>`;
+
+    const skew = ms => { const a = Math.abs(ms); return a < 1000 ? '< 1 s' : `${ms > 0 ? '+' : '−'}${Math.round(a / 1000)} s`; };
+    const rows = [`<tr><td><b>${esc(me.name)}</b> <span class="tag acc">ce nœud</span></td><td><span class="dot up"></span>local</td><td class="mono">${esc(me.version)}</td><td>–</td><td>–</td><td>–</td><td>–</td><td>${dur(me.uptime_s)}</td><td>${num(d.rules_loaded)}</td><td>${num(d.cache.entries)}</td><td>${me.dns_ok ? '<span class="tag ok">actif</span>' : '<span class="tag bad">arrêté</span>'}</td><td>${certTag(me.cert_expires)}</td></tr>`]
       .concat(h.peers.map(p => `<tr><td><b>${esc(p.name)}</b><br><span class="muted mono" style="font-size:11px">${esc(p.url)}</span></td>
         <td>${p.ok ? '<span class="dot up"></span>joint' : `<span class="dot down"></span><span title="${esc(p.last_error || '')}">injoignable</span>`}</td>
         <td class="mono">${p.version ? `<span class="${p.version !== me.version ? 'tag warn' : ''}">${esc(p.version)}</span>` : '<span class="muted">inconnue</span>'}</td>
         <td>${p.ok ? p.latency_ms + ' ms' : '–'}</td><td>${ago(p.last_ok)}</td>
         <td>${p.ok ? (p.behind_ops ? `<span class="tag warn">${p.behind_ops}</span>` : '<span class="tag ok">à jour</span>') : '–'}</td>
         <td>${p.ok ? `<span class="${Math.abs(p.skew_ms) > 5000 ? 'tag warn' : ''}">${skew(p.skew_ms)}</span>` : '–'}</td>
+        <td>${p.ok ? dur(p.uptime_s) : '–'}</td><td>${p.ok ? num(p.rules_loaded) : '–'}</td><td>${p.ok ? num(p.cache_entries) : '–'}</td>
         <td>${p.dns_ok == null ? '–' : p.dns_ok ? '<span class="tag ok">actif</span>' : '<span class="tag bad">arrêté</span>'}</td><td>${certTag(p.cert_expires)}</td></tr>`));
+
+    const cacheTot = d.cache.hits + d.cache.misses;
+    const thisNode = `<div class="card"><h2>Ce nœud</h2><div class="kv">
+      <div><small>Version</small><b>${esc(me.version)}</b></div>
+      <div><small>En fonctionnement depuis</small><b>${dur(me.uptime_s)}</b></div>
+      <div><small>Serveur DNS</small><b>${esc(d.dns_listen)} ${me.dns_ok ? '<span class="tag ok">actif</span>' : `<span class="tag bad">arrêté</span>`}</b>${d.dns_error ? `<small style="color:var(--bad)">${esc(d.dns_error)}</small>` : ''}</div>
+      <div><small>Interface web</small><b>${esc(d.http_listen)}</b></div>
+      <div><small>HTTPS</small><b>${d.tls.web_enabled ? (d.tls.listening ? `port ${d.tls.web_port} <span class="tag ok">actif</span>` : '<span class="tag bad">erreur</span>') : '<span class="muted">désactivé</span>'}${d.tls.redirect_http ? ' · redirection' : ''}</b>${d.tls.error ? `<small style="color:var(--bad)">${esc(d.tls.error)}</small>` : ''}</div>
+      <div><small>Chiffrement du cluster</small><b>${({ off: 'désactivé', ca: 'autorité du cluster', selfsigned: 'auto-signés', pki: 'PKI privée' })[d.tls.cluster_mode] || esc(d.tls.cluster_mode)}</b></div>
+      <div><small>Filtrage</small><b>${d.filtering_enabled ? (d.paused_until ? `<span class="tag warn">en pause jusqu'à ${clock(d.paused_until)}</span>` : '<span class="tag ok">actif</span>') : '<span class="tag bad">désactivé</span>'}</b></div>
+      <div><small>Mode de blocage</small><b>${({ null_ip: 'adresse nulle', nxdomain: 'NXDOMAIN', refused: 'REFUSED' })[d.block_mode] || esc(d.block_mode)}</b></div>
+      <div><small>Upstreams</small><b>${d.upstream_mode === 'parallel' ? 'en parallèle' : 'par priorité'}</b></div>
+      <div><small>DNSSEC</small><b>${yesno(d.dnssec, 'demandé', 'non demandé')}</b></div>
+      <div><small>Règles chargées</small><b>${num(d.rules_loaded)} <span class="muted">dont ${num(d.custom_rules)} perso</span></b></div>
+      <div><small>Latence moyenne</small><b>${Math.round(d.avg_ms)} ms <span class="muted">hors cache, 24 h</span></b></div>
+      <div><small>Cache</small><b>${num(d.cache.entries)} / ${num(d.cache.capacity)} ${d.cache.enabled ? '' : '<span class="tag">désactivé</span>'}</b><small>${cacheTot ? Math.round(d.cache.hits / cacheTot * 100) + ' % de réussite depuis le démarrage' : 'aucune requête depuis le démarrage'}</small></div>
+      <div><small>Journal</small><b>${num(d.log_entries)} entrées</b></div>
+      <div><small>Autorisations temporaires</small><b>${d.temp_allow}</b></div>
+      <div><small>Sessions ouvertes</small><b>${d.auth.sessions}${d.auth.locked ? ` · <span class="tag warn">${d.auth.locked} IP bloquée${d.auth.locked > 1 ? 's' : ''}</span>` : ''}</b></div></div></div>`;
+
+    const objs = d.store.objects;
+    const store = `<div class="card"><h2>Configuration et stockage</h2><div class="kv">
+      <div><small>Listes / règles</small><b>${objs.lists} listes · règles perso ${objs.rules ? 'oui' : 'non'}</b></div>
+      <div><small>Upstreams</small><b>${objs.upstreams}</b></div>
+      <div><small>Réécritures</small><b>${objs.rewrites}</b></div>
+      <div><small>Zones / enregistrements</small><b>${objs.zones} / ${objs.records}</b></div>
+      <div><small>Clients / groupes</small><b>${objs.clients} / ${objs.groups}</b></div>
+      <div><small>Marqueurs de suppression</small><b>${d.store.tombstones}</b></div>
+      <div><small>Conflits non résolus</small><b>${d.store.conflicts ? `<span class="tag warn">${d.store.conflicts}</span> <a href="#history">voir</a>` : '<span class="tag ok">aucun</span>'}</b></div></div></div>`;
+
+    const ups = `<div class="card"><h2>Upstreams <small class="muted" style="font-weight:400">vus depuis ce nœud</small></h2><div class="tblwrap"><table><thead><tr><th>Nom</th><th>Adresse</th><th>État</th><th>Latence</th><th>Réussites</th><th>Dernière erreur</th></tr></thead><tbody>
+      ${h.upstreams.length ? h.upstreams.map(u => { const t = u.ok_count + u.fail_count; return `<tr><td><b>${esc(u.name)}</b>${u.backup ? ' <span class="tag warn">secours</span>' : ''}</td><td class="mono muted">${esc(u.address)}</td>
+        <td>${!u.enabled ? '<span class="tag">désactivé</span>' : u.up === true ? '<span class="dot up"></span>en ligne' : u.up === false ? '<span class="dot down"></span>hors service' : '<span class="dot"></span>inconnu'}</td>
+        <td>${u.enabled && u.up && u.latency_ms != null ? u.latency_ms + ' ms' : '–'}</td><td>${t ? Math.round(u.ok_count / t * 100) + ' % <span class="muted">(' + num(t) + ' essais)</span>' : '–'}</td>
+        <td class="wrap muted">${u.up === false ? esc(u.last_error || '') : ''}</td></tr>`; }).join('') : '<tr><td colspan="6" class="empty">Aucun upstream</td></tr>'}</tbody></table></div></div>`;
+
+    const lists = `<div class="card"><h2>Listes de filtrage</h2><div class="tblwrap"><table><thead><tr><th>Nom</th><th>État</th><th>Règles</th><th>Dernière synchro</th><th>S'applique à</th></tr></thead><tbody>
+      ${h.lists.length ? h.lists.map(l => `<tr><td><b>${esc(l.name)}</b></td>
+        <td>${!l.enabled ? '<span class="tag">désactivée</span>' : l.kind === 'inline' ? '<span class="tag ok">locale</span>' : l.error ? `<span class="tag warn" title="${esc(l.error)}">échec${l.updated_at ? ' · ancienne copie' : ''}</span>` : l.updated_at ? '<span class="tag ok">à jour</span>' : '<span class="tag">en attente</span>'}</td>
+        <td>${l.kind === 'inline' ? '–' : num(l.rules)}${l.unsupported ? ` <span class="muted">(${num(l.unsupported)} ignorées)</span>` : ''}</td>
+        <td>${l.kind === 'url' ? ago(l.updated_at) : '–'}</td><td>${l.scoped ? `${l.scoped} cible${l.scoped > 1 ? 's' : ''}` : '<span class="muted">tous</span>'}</td></tr>${l.error && l.enabled ? `<tr><td colspan="5" class="wrap muted" style="color:var(--warn)">${esc(l.error)}</td></tr>` : ''}`).join('') : '<tr><td colspan="5" class="empty">Aucune liste</td></tr>'}</tbody></table></div></div>`;
+
     const cl = h.cert_log.length ? `<div class="card"><h2>Renouvellements automatiques</h2><div class="tblwrap"><table><tbody>${h.cert_log.map(c => `<tr><td class="mono">${esc(dateFr(c.ts))}</td><td class="wrap">${esc(c.text)}</td></tr>`).join('')}</tbody></table></div></div>` : '';
     const certs = [['Certificat du nœud', me.cert_expires, me.node_auto ? 'renouvelé automatiquement 30 jours avant l\'échéance' : me.cluster_mode === 'pki' ? 'ta PKI : à renouveler toi-même' : 'chiffrement du cluster inactif'],
       ['Autorité du cluster', me.cluster_mode === 'pki' ? null : me.ca_expires, 'valable 10 ans, non renouvelée automatiquement'],
       ['Interface web (HTTPS)', me.web_expires, me.web_auto ? 'renouvelé automatiquement 30 jours avant l\'échéance' : 'certificat importé : à renouveler toi-même']].filter(c => c[1]);
-    $('#hbody').innerHTML = `${probs}
-      <div class="card"><h2>Nœuds</h2><div class="tblwrap"><table><thead><tr><th>Nœud</th><th>État</th><th>Version</th><th>Latence</th><th>Dernière synchro</th><th>Retard</th><th>Horloge</th><th>DNS</th><th>Certificat</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>
+    $('#hbody').innerHTML = `${probs}${sum}
+      <div class="card"><h2>Nœuds</h2><div class="tblwrap"><table><thead><tr><th>Nœud</th><th>État</th><th>Version</th><th>Latence</th><th>Dernière synchro</th><th>Retard</th><th>Horloge</th><th>Actif depuis</th><th>Règles</th><th>Cache</th><th>DNS</th><th>Certificat</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>
         <p class="note" style="margin-top:12px">« Retard » : modifications de configuration que le nœud n'a pas encore reçues de celui-ci. « Horloge » : écart estimé avec ce nœud ; au-delà de quelques secondes, les certificats et l'ordre des modifications peuvent poser problème.</p></div>
-      ${certs.length ? `<div class="card"><h2>Certificats de ce nœud</h2><div class="tblwrap"><table><tbody>${certs.map(c => `<tr><td>${esc(c[0])}</td><td>${certTag(c[1])}</td><td class="muted">${esc(dateFr(c[1]))}</td><td class="wrap muted">${esc(c[2])}</td></tr>`).join('')}</tbody></table></div></div>` : ''}${cl}`;
+      <div class="stack" style="margin-top:14px">${thisNode}${ups}${lists}${store}
+      ${certs.length ? `<div class="card"><h2>Certificats de ce nœud</h2><div class="tblwrap"><table><tbody>${certs.map(c => `<tr><td>${esc(c[0])}</td><td>${certTag(c[1])}</td><td class="muted">${esc(dateFr(c[1]))}</td><td class="wrap muted">${esc(c[2])}</td></tr>`).join('')}</tbody></table></div></div>` : ''}${cl}</div>`;
   }
   await draw();
   every(draw, 5000);

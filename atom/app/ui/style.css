@@ -1,16 +1,16 @@
 :root{
   --bg:#f4f6f9;--surface:#fff;--surface2:#eceff4;--line:#d8dee8;--fg:#12161f;--muted:#5b6578;
-  --accent:#2c5cf0;--accent-soft:#e3eaff;--accent-fg:#fff;
+  --accent:#2c5cf0;--accent-soft:#e3eaff;--accent-fg:#fff;--vio:#8a3ffc;
   --g1:#2c5cf0;--g2:#0f8f6a;--g3:#c2570c;--g4:#8a3ffc;--g5:#5b6578;
   --good:#12805c;--good-soft:#dcf3e8;--warn:#a15c00;--warn-soft:#fbecd0;--bad:#c33a3a;--bad-soft:#fadcdc;
   --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--mono:ui-monospace,"Cascadia Mono",Consolas,monospace;
   color-scheme:light}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0d1118;--surface:#151a23;--surface2:#1c2230;--line:#2a3242;--fg:#e7ebf3;--muted:#939db2;
-  --accent:#7f9cff;--accent-soft:#1d2848;--accent-fg:#0d1118;
+  --accent:#7f9cff;--accent-soft:#1d2848;--accent-fg:#0d1118;--vio:#b794ff;
   --g1:#7f9cff;--g2:#4fd1a1;--g3:#f0a35a;--g4:#b794ff;--g5:#939db2;
   --good:#4fd1a1;--good-soft:#12302a;--warn:#f0b24a;--warn-soft:#352a12;--bad:#ff7b7b;--bad-soft:#391b1d;color-scheme:dark}}
 :root[data-theme="dark"]{--bg:#0d1118;--surface:#151a23;--surface2:#1c2230;--line:#2a3242;--fg:#e7ebf3;--muted:#939db2;
-  --accent:#7f9cff;--accent-soft:#1d2848;--accent-fg:#0d1118;
+  --accent:#7f9cff;--accent-soft:#1d2848;--accent-fg:#0d1118;--vio:#b794ff;
   --g1:#7f9cff;--g2:#4fd1a1;--g3:#f0a35a;--g4:#b794ff;--g5:#939db2;
   --good:#4fd1a1;--good-soft:#12302a;--warn:#f0b24a;--warn-soft:#352a12;--bad:#ff7b7b;--bad-soft:#391b1d;color-scheme:dark}
 :root[data-theme="light"]{color-scheme:light}
@@ -191,3 +191,58 @@ body.ro .sw{pointer-events:none;opacity:.6}
 body.ro #nav a[data-r="cluster"],body.ro #nav a[data-r="certs"],body.ro #nav a[data-r="security"]{display:none}
 .side a:focus-visible{outline-offset:-2px}
 @media (max-height:640px) and (min-width:821px){.navgrp{padding-top:8px}.nodechip{display:none}}
+
+/* ---- tuiles en aire translucide (tableau de bord) ---- */
+.atiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-bottom:6px}
+.at{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:12px;background:var(--surface);min-height:112px;padding:12px 14px;display:block;text-decoration:none;color:inherit}
+.at .v{font-size:clamp(20px,1.6vw + 12px,30px);font-weight:600;font-variant-numeric:tabular-nums;line-height:1.15;position:relative;z-index:1}
+.at .p{position:absolute;right:12px;top:14px;font-size:clamp(11.5px,.5vw + 8px,14px);font-weight:600;z-index:1}
+.at svg{position:absolute;left:0;right:0;bottom:0;width:100%;height:56%;display:block}
+.alabel{margin:6px 0 14px;font-size:13px;font-weight:500}
+/* ---- graphique par heure : HTML, il ne se déforme pas ---- */
+.chart{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:10px;row-gap:4px}
+.chart .yax{display:flex;flex-direction:column-reverse;justify-content:space-between;height:clamp(150px,20vw,230px);font:clamp(10.5px,.5vw + 8px,12.5px) var(--mono);color:var(--muted);text-align:right}
+.chart .plot{position:relative;height:clamp(150px,20vw,230px)}
+.chart .gl{position:absolute;left:0;right:0;border-top:1px solid var(--line)}
+.chart .cols{position:absolute;inset:0;display:flex;align-items:flex-end;gap:clamp(2px,.4vw,5px)}
+.chart .cols i{flex:1;min-width:2px;background:var(--accent);border-radius:3px 3px 0 0;position:relative}
+.chart .cols s{position:absolute;left:0;right:0;bottom:0;background:var(--bad);border-radius:0}
+.chart .xax{grid-column:2;display:flex;gap:clamp(2px,.4vw,5px);font:clamp(10.5px,.5vw + 8px,12.5px) var(--mono);color:var(--muted)}
+.chart .xax span{flex:1;text-align:center;visibility:hidden;min-width:0}
+.chart .xax span.k{visibility:visible}
+@media (max-width:640px){.chart .xax span.k:not(.k2){visibility:hidden}}
+/* ---- menu contextuel « ⋯ » ---- */
+.kebab{font-weight:700;letter-spacing:.1em;padding:2px 9px}
+.ctxmenu{position:fixed;z-index:70;min-width:210px;max-width:calc(100vw - 16px);background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.22);padding:5px;display:flex;flex-direction:column}
+.ctxmenu button{border:0;background:transparent;text-align:left;padding:8px 10px;border-radius:7px;cursor:pointer;font-size:13px;color:var(--fg)}
+.ctxmenu button:hover:not(:disabled){background:var(--surface2)}
+.ctxmenu button.danger{color:var(--bad)}
+.ctxmenu button:disabled{opacity:.45;cursor:default}
+.ctxmenu hr{border:0;border-top:1px solid var(--line);margin:4px 2px;width:auto}
+/* ---- tableau du journal ---- */
+tr.blk td{background:color-mix(in srgb,var(--bad) 7%,transparent)}
+.fbar{display:flex;flex-wrap:wrap;gap:10px;align-items:end}
+.fbar .grow{flex:1 1 240px}
+.fbar label{min-width:150px}
+.advf{margin-top:12px}
+/* ---- onglets de page ---- */
+.tabsbar{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:14px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.tabsbar button{border:0;background:transparent;color:var(--muted);padding:9px 14px;font-weight:600;cursor:pointer;border-bottom:3px solid transparent;margin-bottom:-1px;white-space:nowrap}
+.tabsbar button:hover{color:var(--fg)}
+.tabsbar button.on{color:var(--fg);border-bottom-color:var(--accent)}
+/* ---- santé ---- */
+.kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px 18px}
+.kv div{display:flex;flex-direction:column;min-width:0}
+.kv small{color:var(--muted);font-size:11.5px}
+.kv b{font-weight:600;overflow-wrap:anywhere}
+.hsum{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:14px}
+.hsum .tile{border-left:4px solid var(--line)}
+.hsum .tile.good{border-left-color:var(--good)}.hsum .tile.warn{border-left-color:var(--warn)}.hsum .tile.bad{border-left-color:var(--bad)}
+.chip.on{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+.chip.on .muted{color:inherit;opacity:.8}
+#tchips .chip:not(.on){background:var(--surface);color:var(--fg);border-color:var(--line)}
+#logt td.wrap{max-width:210px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#logt th,#logt td{padding-left:10px;padding-right:10px}
+#logt th:last-child,#logt td:last-child{position:sticky;right:0;background:var(--surface);box-shadow:-8px 0 8px -8px rgba(0,0,0,.18)}
+#logt th:last-child{background:var(--surface2)}
+#logt tr.blk td:last-child{background:color-mix(in srgb,var(--bad) 7%,var(--surface))}

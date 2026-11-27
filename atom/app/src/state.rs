@@ -80,6 +80,9 @@ pub struct PeerStatus {
     pub dns_ok: Option<bool>,
     /// Nombre de modifications de configuration que ce nœud n'a pas encore reçues de nous.
     pub behind_ops: u64,
+    pub uptime_s: u64,
+    pub rules_loaded: u64,
+    pub cache_entries: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]

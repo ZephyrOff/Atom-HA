@@ -44,6 +44,12 @@ pub struct PullResp {
     pub dns_ok: Option<bool>,
     #[serde(default)]
     pub cfg_vv: HashMap<String, u64>,
+    #[serde(default)]
+    pub uptime_s: u64,
+    #[serde(default)]
+    pub rules_loaded: u64,
+    #[serde(default)]
+    pub cache_entries: u64,
 }
 
 const LOG_BATCH: usize = 5000;
@@ -116,6 +122,9 @@ async fn pull_from(app: &Arc<App>, peer_id: &str, url: &str, token: &str) -> any
         cert_expires: r.cert_expires,
         dns_ok: r.dns_ok,
         behind_ops: behind,
+        uptime_s: r.uptime_s,
+        rules_loaded: r.rules_loaded,
+        cache_entries: r.cache_entries,
     };
     Ok((nc, nl))
 }
@@ -140,6 +149,9 @@ pub fn answer_pull(app: &Arc<App>, req: PullReq) -> PullResp {
         cert_expires: crate::tls::own_cert_expiry(app),
         dns_ok: Some(app.dns_ok.load(std::sync::atomic::Ordering::Relaxed)),
         cfg_vv: app.store.vv(),
+        uptime_s: app.started.elapsed().as_secs(),
+        rules_loaded: app.engine.load().lists.iter().map(|l| l.count as u64).sum(),
+        cache_entries: app.cache.lock().len() as u64,
     }
 }
 

@@ -223,9 +223,9 @@ async function entityPage(token, kind, key) {
     const bi = live && ent.block_internet, bl = live && ent.block_lan;
     $('#acc').innerHTML = `<h2>Accès réseau</h2>
       <div class="stack">
-        <label class="row sp"><span><b>Bloquer Internet</b><br><span class="muted">Aucun nom extérieur n'est résolu</span></span>${sw(bi, 'data-acc="internet"')}</label>
-        <label class="row sp"><span><b>Bloquer le réseau local</b><br><span class="muted">Noms locaux et réponses vers des adresses privées refusés</span></span>${sw(bl, 'data-acc="lan"')}</label>
-        <label class="lbl">Durée du blocage à l'activation<select class="f" id="adur"><option value="0">Jusqu'à ce que je le rétablisse</option><option value="60">1 heure</option><option value="240">4 heures</option><option value="1440">24 heures</option></select></label>
+        <label class="row sp"><span><b>Accès à Internet</b><br><span class="muted">Désactive pour couper : aucun nom extérieur n'est résolu</span></span>${sw(!bi, 'data-acc="internet"')}</label>
+        <label class="row sp"><span><b>Accès au réseau local</b><br><span class="muted">Désactive pour couper : noms locaux et réponses vers des adresses privées refusés</span></span>${sw(!bl, 'data-acc="lan"')}</label>
+        <label class="lbl">Durée d'une coupure<select class="f" id="adur"><option value="0">Jusqu'à ce que je le rétablisse</option><option value="60">1 heure</option><option value="240">4 heures</option><option value="1440">24 heures</option></select></label>
         <div>${bi || bl ? `${accessTags(ent)}` : '<span class="muted">Aucun blocage en cours</span>'}</div>
         <hr style="border:0;border-top:1px solid var(--line);width:100%">
         <div><b>Suspendre les filtres</b><br><span class="muted">Toutes les requêtes passent, sans liste ni règle de blocage, puis le filtrage revient tout seul.</span></div>
@@ -359,11 +359,11 @@ async function entityPage(token, kind, key) {
   main.onchange = guard(async e => {
     const a = e.target.dataset.acc; if (!a) return;
     const minutes = +$('#adur').value;
-    const patch = a === 'internet' ? { block_internet: e.target.checked } : { block_lan: e.target.checked };
+    const patch = a === 'internet' ? { block_internet: !e.target.checked } : { block_lan: !e.target.checked };
     const cur = { block_internet: ent.block_internet, block_lan: ent.block_lan, ...patch };
     patch.block_until = (cur.block_internet || cur.block_lan) ? (minutes ? Date.now() + minutes * 60000 : null) : null;
     const id = await saveAccess(patch);
-    toast(e.target.checked ? 'Blocage activé' : 'Blocage levé');
+    toast(e.target.checked ? 'Accès rétabli' : 'Accès coupé');
     if (!isGroup && !ent.id) return;
     if (!isGroup && key !== id && !DIR.clients.find(c => c.key === key)) { location.hash = keyHref(id); return; }
     drawHead(); drawAcc(); drawIdent();
@@ -385,8 +385,8 @@ pages.access = async function (token) {
   let q = '';
   main.innerHTML = `<div class="head"><div><h1>Accès réseau</h1><p>Couper l'accès à Internet, au réseau local, ou aux deux, pour un client ou un groupe. Le blocage peut être temporaire.</p></div></div>
     <div class="card"><div class="row" style="margin-bottom:12px"><input class="f grow" id="aq" type="search" placeholder="Rechercher un client ou un groupe" aria-label="Rechercher">
-      <label class="row"><span class="muted">Durée à l'activation</span><select class="f" id="adur" style="width:auto"><option value="0">Jusqu'au rétablissement</option><option value="60">1 heure</option><option value="240">4 heures</option><option value="1440">24 heures</option></select></label></div>
-      <div class="tblwrap"><table><thead><tr><th>Nom</th><th>Type</th><th>Internet</th><th>Réseau local</th><th>État</th><th>Filtres</th><th></th></tr></thead><tbody id="atb"></tbody></table></div>
+      <label class="row"><span class="muted">Durée d'une coupure</span><select class="f" id="adur" style="width:auto"><option value="0">Jusqu'au rétablissement</option><option value="60">1 heure</option><option value="240">4 heures</option><option value="1440">24 heures</option></select></label></div>
+      <div class="tblwrap"><table><thead><tr><th>Nom</th><th>Type</th><th>Internet autorisé</th><th>Réseau local autorisé</th><th>État</th><th>Filtres</th><th></th></tr></thead><tbody id="atb"></tbody></table></div>
       <p class="note" style="margin-top:12px"><b>Suspendre les filtres</b> laisse passer toutes les requêtes d'un client ou d'un groupe pendant la durée choisie (listes et règles ignorées), puis le filtrage revient tout seul. Les réécritures, zones locales et blocages d'accès restent appliqués.</p><p class="note" style="margin-top:8px">Le blocage agit au niveau du DNS : l'appareil ne trouve plus les adresses demandées. Un appareil qui se connecte à une adresse IP directe, ou qui utilise un autre serveur DNS (DNS privé d'un téléphone, DoH d'un navigateur), n'est pas arrêté. Pour une coupure réseau réelle, ajoute une règle sur le routeur.</p></div>`;
   function rows() {
     const term = q.trim().toLowerCase();
@@ -399,7 +399,7 @@ pages.access = async function (token) {
       const link = o.kind === 'group' ? `#group/${encodeURIComponent(o.id)}` : keyHref(o.key);
       return `<tr><td><a href="${link}"><b>${esc(o.label)}</b></a>${o.kind === 'client' && !o.id ? ' <span class="tag">non enregistré</span>' : ''}<div class="mono muted" style="font-size:11px">${esc((o.ids || []).join(', '))}</div></td>
         <td>${o.kind === 'group' ? 'Groupe' : 'Client'}</td>
-        <td>${sw(bi, `data-a="internet" data-k="${o.kind}" data-key="${esc(o.key || o.id)}"`)}</td><td>${sw(bl, `data-a="lan" data-k="${o.kind}" data-key="${esc(o.key || o.id)}"`)}</td>
+        <td>${sw(!bi, `data-a="internet" data-k="${o.kind}" data-key="${esc(o.key || o.id)}"`)}</td><td>${sw(!bl, `data-a="lan" data-k="${o.kind}" data-key="${esc(o.key || o.id)}"`)}</td>
         <td>${accessTags(o)}</td><td>${bypassCell(o)}</td><td class="row" style="flex-wrap:nowrap"><button class="btn sm" data-all="${o.kind}:${esc(o.key || o.id)}">Tout bloquer</button><button class="btn sm" data-none="${o.kind}:${esc(o.key || o.id)}" ${bi || bl ? '' : 'disabled'}>Rétablir</button></td></tr>`;
     }).join('') : '<tr><td colspan="7" class="empty">Aucun client ni groupe</td></tr>';
   }
@@ -424,8 +424,8 @@ pages.access = async function (token) {
   }
   main.onchange = guard(async e => {
     const a = e.target.dataset.a; if (!a) return;
-    await apply(e.target.dataset.k, e.target.dataset.key, a === 'internet' ? { block_internet: e.target.checked } : { block_lan: e.target.checked });
-    toast(e.target.checked ? 'Blocage activé' : 'Blocage levé');
+    await apply(e.target.dataset.k, e.target.dataset.key, a === 'internet' ? { block_internet: !e.target.checked } : { block_lan: !e.target.checked });
+    toast(e.target.checked ? 'Accès rétabli' : 'Accès coupé');
   });
   main.onclick = guard(async e => {
     const bp = e.target.closest('[data-bp]');
@@ -519,25 +519,34 @@ pages.cache = async function (token) {
 
 pages.rewrites = async function (token) {
   let rws = [], editing = null, scope = null;
-  main.innerHTML = `<div class="head"><div><h1>Réécritures DNS</h1><p>Un domaine répond avec l'adresse (ou le nom) de ton choix. Les jokers sont acceptés : <span class="mono">*.apps.maison.lan</span>. Une réécriture peut être limitée à des clients ou des groupes.</p></div>
+  main.innerHTML = `<div class="head"><div><h1>Réécritures DNS</h1><p>Un domaine répond avec l'adresse (ou le nom) de ton choix. Les jokers sont acceptés : <span class="mono">*.apps.maison.lan</span>. Une réécriture peut être limitée à des clients ou des groupes, et être temporaire.</p></div>
     <label class="row"><span class="muted">Toutes les réécritures</span>${sw(true, 'id="rwall"')}</label></div>
-    <div class="card"><div class="tblwrap"><table><thead><tr><th>Actif</th><th>Domaine</th><th>Réponse</th><th>Portée</th><th>Expire</th><th></th></tr></thead><tbody id="rt"></tbody></table></div></div>
-    <div class="card"><h2 id="rh">Ajouter une réécriture</h2><div class="stack">
-      <div class="row"><input class="f grow" id="rd" placeholder="nas.maison.lan" aria-label="Domaine"><input class="f grow" id="ra" placeholder="192.168.1.20 ou autre.domaine.lan" aria-label="Réponse">
-        <select class="f" id="rx" style="width:auto" aria-label="Expiration"><option value="keep" hidden>Conserver l'expiration</option><option value="0">Sans expiration</option><option value="60">Pendant 1 h</option><option value="120">Pendant 2 h</option><option value="1440">Pendant 24 h</option></select></div>
-      <div class="row" style="align-items:flex-start"><span class="muted" style="padding-top:8px">Portée</span><div id="rscope" class="grow"></div></div>
-      <div class="row"><button class="btn pri" id="radd">Ajouter</button><button class="btn" id="rcancel" hidden>Annuler</button></div></div></div>`;
+    <div class="card" id="rwform"><h2 id="rh">Ajouter une réécriture</h2>
+      <div class="row wr" style="gap:8px">
+        <input class="f grow" id="rd" placeholder="nas.maison.lan ou *.apps.maison.lan" aria-label="Domaine">
+        <span class="muted" aria-hidden="true">→</span>
+        <input class="f grow" id="ra" placeholder="192.168.1.20 ou autre.domaine.lan" aria-label="Réponse">
+        <button class="btn" id="scopebtn" type="button" aria-expanded="false">Portée : tous ▾</button>
+        <select class="f" id="rx" style="width:auto" aria-label="Expiration"><option value="keep" hidden>Conserver l'expiration</option><option value="0">Sans expiration</option><option value="60">Pendant 1 h</option><option value="120">Pendant 2 h</option><option value="1440">Pendant 24 h</option></select>
+        <button class="btn pri" id="radd">Ajouter</button><button class="btn" id="rcancel" hidden>Annuler</button></div>
+      <div id="scopebox" hidden style="margin-top:12px"><div class="row" style="align-items:flex-start"><span class="muted" style="padding-top:8px">Limiter à</span><div id="rscope" class="grow"></div></div></div></div>
+    <div class="card" style="margin-top:14px"><div class="tblwrap"><table><thead><tr><th>Actif</th><th>Domaine</th><th>Réponse</th><th>Portée</th><th>Expire</th><th></th></tr></thead><tbody id="rt"></tbody></table></div></div>`;
   async function draw() {
     const [r, set] = await Promise.all([get('c/rewrites'), getSettings()]);
     if (token !== routeToken) return;
     rws = r;
     $('#rwall').checked = set.rewrites_enabled;
     $('#rt').innerHTML = rws.length ? rws.map(r => `<tr><td>${sw(r.enabled, `data-tog="${r.id}"`)}</td><td class="mono">${esc(r.domain)}</td><td class="mono">${esc(r.answer)}</td><td>${scopeTags(r)}</td>
-      <td>${r.expires_at ? (r.expires_at < Date.now() ? '<span class="tag warn">expirée</span>' : 'à ' + clock(r.expires_at)) : 'jamais'}</td>
-      <td class="row" style="flex-wrap:nowrap"><button class="btn sm" data-edit="${r.id}">Modifier</button><button class="btn sm danger" data-del="${r.id}">Supprimer</button></td></tr>`).join('') : '<tr><td colspan="6" class="empty">Aucune réécriture</td></tr>';
+      <td>${r.expires_at ? (r.expires_at < Date.now() ? '<span class="tag bad">expirée</span>' : `<span class="tag warn" title="${esc(until(r.expires_at))}">expire dans ${remaining(r.expires_at)}</span>`) : '<span class="muted">jamais</span>'}</td>
+      <td><button class="btn sm kebab" data-rowmenu="${esc(JSON.stringify([['Modifier', 'edit', r.id], ['Supprimer', 'del', r.id, 1]]))}" aria-label="Actions" aria-haspopup="menu">⋯</button></td></tr>`).join('') : '<tr><td colspan="6" class="empty">Aucune réécriture</td></tr>';
   }
+  const updScope = () => {
+    const sc = scope.get(), n = sc.clients.length + sc.groups.length;
+    $('#scopebtn').textContent = n ? `Portée : ${n} ▾` : 'Portée : tous ▾';
+  };
+  const showScope = open => { $('#scopebox').hidden = !open; $('#scopebtn').setAttribute('aria-expanded', String(open)); };
   function reset() {
-    editing = null; $('#rd').value = ''; $('#ra').value = ''; $('#rx').value = '0'; scope.set({});
+    editing = null; $('#rd').value = ''; $('#ra').value = ''; $('#rx').value = '0'; scope.set({}); updScope(); showScope(false);
     $('#radd').textContent = 'Ajouter'; $('#rh').textContent = 'Ajouter une réécriture'; $('#rcancel').hidden = true;
   }
   $('#radd').onclick = guard(async () => {
@@ -559,10 +568,11 @@ pages.rewrites = async function (token) {
   $('#rcancel').onclick = reset;
   main.onclick = guard(async e => {
     const t = e.target.closest('button'); if (!t) return;
+    if (t.id === 'scopebtn') { showScope($('#scopebox').hidden); return; }
     if (t.dataset.del) { await api('DELETE', `c/rewrites/${t.dataset.del}`); if (editing === t.dataset.del) reset(); draw(); }
     else if (t.dataset.edit) {
       const r = rws.find(x => x.id === t.dataset.edit); editing = r.id;
-      $('#rd').value = r.domain; $('#ra').value = r.answer; $('#rx').value = 'keep'; scope.set(r);
+      $('#rd').value = r.domain; $('#ra').value = r.answer; $('#rx').value = 'keep'; scope.set(r); updScope(); showScope((r.clients || []).length + (r.groups || []).length > 0);
       $('#radd').textContent = 'Enregistrer'; $('#rh').textContent = 'Modifier une réécriture'; $('#rcancel').hidden = false; $('#rd').focus();
     }
   });
@@ -574,7 +584,9 @@ pages.rewrites = async function (token) {
   });
   await loadDir();
   scope = mountScope($('#rscope'), {});
+  ['click', 'change'].forEach(ev => $('#rscope').addEventListener(ev, () => setTimeout(updScope, 0)));
   $('#rx').value = '0';
+  $('#rd').onkeydown = $('#ra').onkeydown = e => { if (e.key === 'Enter') $('#radd').click(); };
   await draw();
   every(async () => { if (document.activeElement && ['INPUT', 'SELECT'].includes(document.activeElement.tagName)) return; await draw(); }, 6000);
 };

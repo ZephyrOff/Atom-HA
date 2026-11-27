@@ -72,6 +72,10 @@ pub struct Stats {
     pub cached: u64,
     pub avg_ms: f64,
     pub hours: Vec<[u64; 2]>,
+    /// Réponses venues du cache, par heure (24 valeurs, la dernière = heure en cours).
+    pub hours_cached: Vec<u64>,
+    /// Latence moyenne hors cache, par heure, en ms (0 s'il n'y a pas de mesure).
+    pub hours_ms: Vec<f64>,
     pub top_domains: Vec<(String, u64)>,
     pub top_blocked: Vec<(String, u64)>,
     pub top_clients: Vec<(String, u64)>,
@@ -245,7 +249,9 @@ impl QLog {
         let g = self.inner.lock();
         let now = now_ms();
         let cutoff = now.saturating_sub(24 * 3600 * 1000);
-        let mut s = Stats { hours: vec![[0, 0]; 24], ..Default::default() };
+        let mut s = Stats { hours: vec![[0, 0]; 24], hours_cached: vec![0; 24], hours_ms: vec![0.0; 24], ..Default::default() };
+        let mut h_sum = [0u64; 24];
+        let mut h_n = [0u64; 24];
         let mut dom: HashMap<String, u64> = HashMap::new();
         let mut blk: HashMap<String, u64> = HashMap::new();
         let mut cli: HashMap<String, u64> = HashMap::new();
@@ -282,17 +288,28 @@ impl QLog {
                 }
                 if e.cached {
                     s.cached += 1;
+                    s.hours_cached[idx] += 1;
                 } else if e.result == "allowed" {
                     ms_sum += e.ms as u64;
                     ms_n += 1;
+                    h_sum[idx] += e.ms as u64;
+                    h_n[idx] += 1;
                 }
             }
+        }
+        for i in 0..24 {
+            s.hours_ms[i] = if h_n[i] > 0 { h_sum[i] as f64 / h_n[i] as f64 } else { 0.0 };
         }
         s.avg_ms = if ms_n > 0 { ms_sum as f64 / ms_n as f64 } else { 0.0 };
         s.top_domains = top(dom);
         s.top_blocked = top(blk);
         s.top_clients = top(cli);
         s
+    }
+
+    /// Nombre d'entrées du journal conservées (tous nœuds).
+    pub fn count(&self) -> usize {
+        self.inner.lock().per.values().map(|m| m.len()).sum()
     }
 
     pub fn save_if_dirty(&self) {

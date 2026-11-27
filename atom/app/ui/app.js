@@ -31,6 +31,59 @@ function toast(msg, err) {
   toastT = setTimeout(() => (t.className = ''), err ? 4500 : 2200);
 }
 const fail = e => toast(e.message || String(e), true);
+
+// Menu contextuel : items = [{ label, run, danger, disabled } | '-'].
+function closeMenu() { const m = $('.ctxmenu'); if (m) m.remove(); }
+function openMenu(btn, items) {
+  closeMenu();
+  const m = document.createElement('div');
+  m.className = 'ctxmenu'; m.setAttribute('role', 'menu');
+  m.innerHTML = items.map((it, i) => it === '-' ? '<hr>' : `<button type="button" role="menuitem" data-i="${i}" class="${it.danger ? 'danger' : ''}" ${it.disabled ? 'disabled' : ''}>${esc(it.label)}</button>`).join('');
+  document.body.appendChild(m);
+  const r = btn.getBoundingClientRect(), w = m.offsetWidth, h = m.offsetHeight;
+  m.style.left = Math.max(8, Math.min(r.right - w, innerWidth - w - 8)) + 'px';
+  m.style.top = (r.bottom + 4 + h > innerHeight - 8 ? Math.max(8, r.top - h - 4) : r.bottom + 4) + 'px';
+  m.onclick = async e => {
+    const b = e.target.closest('button[data-i]');
+    if (!b) return;
+    closeMenu();
+    try { await items[+b.dataset.i].run(); } catch (err) { fail(err); }
+  };
+  m.querySelector('button:not(:disabled)')?.focus();
+}
+document.addEventListener('click', e => { if (!e.target.closest('.ctxmenu') && !e.target.closest('[data-menu]') && !e.target.closest('[data-rowmenu]')) closeMenu(); });
+// Menu « ⋯ » d'une ligne de tableau : [[libellé, clé data-*, id, danger?], …]. Rejoue le gestionnaire de clic de la page.
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-rowmenu]');
+  if (!b) return;
+  openMenu(b, JSON.parse(b.dataset.rowmenu).map(([label, key, id, danger]) => ({
+    label, danger: !!danger,
+    run: async () => { const f = document.createElement('button'); f.dataset[key] = id; if (danger) f.dataset.sure = '1'; await main.onclick({ target: f }); },
+  })));
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMenu(); });
+addEventListener('scroll', closeMenu, true);
+addEventListener('resize', closeMenu);
+
+// Courbe lissée (aire) pour les tuiles du tableau de bord.
+function smoothPath(arr, w, h) {
+  const m = Math.max(...arr, 1) * 1.08, n = arr.length;
+  const pts = arr.map((v, i) => [i / (n - 1) * w, h - (v / m) * h * 0.9 - 2]);
+  let d = `M${pts[0][0]},${pts[0][1].toFixed(1)}`;
+  for (let i = 1; i < n; i++) {
+    const cx = ((pts[i - 1][0] + pts[i][0]) / 2).toFixed(1);
+    d += ` C${cx},${pts[i - 1][1].toFixed(1)} ${cx},${pts[i][1].toFixed(1)} ${pts[i][0].toFixed(1)},${pts[i][1].toFixed(1)}`;
+  }
+  return d;
+}
+let _gid = 0;
+function areaTile(href, label, value, pct, series, color) {
+  const id = 'ag' + (++_gid), d = smoothPath(series, 200, 60);
+  return `<div><a class="at" href="${href}" style="--c:${color}"><div class="v">${value}</div><div class="p" style="color:${color}">${pct}</div>
+    <svg viewBox="0 0 200 60" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${color}" stop-opacity=".38"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>
+    <path d="${d} L200,60 L0,60 Z" fill="url(#${id})"/><path d="${d}" fill="none" stroke="${color}" stroke-opacity=".55" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg></a>
+    <div class="alabel" style="color:${color}">${label}</div></div>`;
+}
 const guard = fn => async (...a) => { try { await fn(...a); } catch (e) { fail(e); } };
 
 function every(fn, ms) { timers.push(setInterval(() => { fn().catch(() => {}); }, ms)); }
@@ -79,20 +132,17 @@ pages.dashboard = async function (token) {
       ? `<span class="tag warn">Filtrage en pause jusqu'à ${clock(paused)}</span><button class="btn" data-a="resume">Reprendre</button>`
       : `<span class="muted">Pause :</span>${[5, 30, 60].map(m => `<button class="btn sm" data-pause="${m}">${m} min</button>`).join('')}
          <span class="row" style="margin-left:8px">Filtrage ${sw(set.filtering_enabled, 'data-a="filtering"')}</span>`;
-    const max = Math.max(10, ...st.hours.map(h => h[0]));
-    const nice = (() => { const p = Math.pow(10, Math.floor(Math.log10(max))); const n = Math.ceil(max / p) * p; return n % 4 ? Math.ceil(n / 4) * 4 : n; })();
-    const W = 720, H = 190, L = 40, B = 22, T = 8, ch = H - B - T, cw = W - L - 4, bw = cw / 24;
-    let svg = '';
-    for (let i = 0; i <= 4; i++) {
-      const v = nice / 4 * i, y = T + ch - v / nice * ch;
-      svg += `<line x1="${L}" x2="${W - 4}" y1="${y}" y2="${y}"/><text x="${L - 6}" y="${y + 3}" text-anchor="end">${v >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0) + 'k' : Math.round(v)}</text>`;
-    }
     const nowH = new Date().getHours();
-    st.hours.forEach((h, i) => {
-      const ok = h[0] - h[1], x = L + i * bw + 2, w = bw - 4, hg = ok / nice * ch, hb = h[1] / nice * ch;
-      svg += `<rect x="${x}" y="${T + ch - hg - hb}" width="${w}" height="${hg}" fill="var(--accent)"/><rect x="${x}" y="${T + ch - hb}" width="${w}" height="${hb}" fill="var(--bad)"/>`;
-      if (i % 4 === 3) svg += `<text x="${x + w / 2}" y="${H - 6}" text-anchor="middle">${String((nowH - (23 - i) + 24) % 24).padStart(2, '0')}h</text>`;
-    });
+    const hmax = Math.max(10, ...st.hours.map(h => h[0]));
+    const nice = (() => { const p = Math.pow(10, Math.floor(Math.log10(hmax))); const n = Math.ceil(hmax / p) * p; return n % 4 ? Math.ceil(n / 4) * 4 : n; })();
+    const kfmt = v => v >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0).replace('.', ',') + 'k' : String(Math.round(v));
+    const ticks = [0, 1, 2, 3, 4].map(k => nice / 4 * k);
+    const hours = st.hours;
+    const lat = (() => { let last = 0; return (st.hours_ms || []).map(v => (last = v || last)); })();
+    const chart = `<div class="chart"><div class="yax">${ticks.map(v => `<span>${kfmt(v)}</span>`).join('')}</div>
+      <div class="plot">${ticks.slice(1).map(v => `<div class="gl" style="bottom:${v / nice * 100}%"></div>`).join('')}
+        <div class="cols">${hours.map((h, i) => { const hh = String((nowH - (23 - i) + 24) % 24).padStart(2, '0'); return `<i style="height:${Math.max(0.6, h[0] / nice * 100)}%" title="${hh}h : ${num(h[0])} requêtes, ${num(h[1])} bloquées"><s style="height:${h[0] ? h[1] / h[0] * 100 : 0}%"></s></i>`; }).join('')}</div></div>
+      <div class="xax">${hours.map((h, i) => `<span class="${i % 4 === 3 ? 'k' : ''} ${i % 8 === 7 ? 'k2' : ''}">${String((nowH - (23 - i) + 24) % 24).padStart(2, '0')}h</span>`).join('')}</div></div>`;
     const rank = (list, cls) => {
       const m = Math.max(1, ...list.map(x => x[1]));
       return list.length ? `<div class="rank ${cls}">${list.map(([n, c]) => `<div><span title="${esc(n)}">${esc(n)}</span><span class="mono">${num(c)}</span><u style="width:${c / m * 100}%"></u></div>`).join('')}</div>` : '<div class="empty">Aucune donnée</div>';
@@ -101,15 +151,15 @@ pages.dashboard = async function (token) {
     let hp = [];
     try { hp = (await get('health')).problems; } catch { /* ignoré */ }
     $('#dbody').innerHTML = `${hp.length ? `<a class="card hbanner ${hp.some(p => p.level === 'bad') ? 'bad' : 'warn'}" href="#health"><b>${hp.length} problème${hp.length > 1 ? 's' : ''} détecté${hp.length > 1 ? 's' : ''}</b> : ${esc(hp[0].scope)} · ${esc(hp[0].text)}${hp.length > 1 ? ` <span class="muted">et ${hp.length - 1} autre(s)</span>` : ''}</a>` : ''}${info.dns_error || !info.dns_ok ? `<div class="card" style="border-color:var(--bad);margin-bottom:14px"><b style="color:var(--bad)">Le serveur DNS de ce nœud n'écoute pas.</b> ${info.dns_error ? `<span class="mono">${esc(info.dns_error)}</span>` : ''}<p class="muted" style="margin-top:6px">Aucun appareil ne peut l'interroger. Le plus souvent, le port 53 est déjà utilisé (systemd-resolved, dnsmasq, un autre serveur DNS) ou demande des droits supplémentaires. Voir le README, section « Installation ».</p></div>` : ''}
-      <div class="tiles">
-        <div class="tile"><small>Requêtes</small><strong>${num(st.total)}</strong></div>
-        <div class="tile"><small>Bloquées</small><strong>${pct.toFixed(1).replace('.', ',')} %</strong><span>${num(st.blocked)} requêtes</span></div>
-        <div class="tile"><small>Latence moyenne</small><strong>${Math.round(st.avg_ms)} ms</strong><span>hors cache</span></div>
-        <div class="tile"><small>Réponses du cache</small><strong>${st.total ? Math.round(st.cached / st.total * 100) : 0} %</strong><span>${num(st.cached)} requêtes</span></div>
-        <div class="tile"><small>Règles chargées</small><strong>${num(info.rules_loaded)}</strong><span>${cl.peers.length + 1} nœud(s)</span></div>
+      <div class="atiles">
+        ${areaTile('#log', 'Requêtes DNS', num(st.total), '24 h', hours.map(h => h[0]), 'var(--muted)')}
+        ${areaTile('#log', 'Requêtes bloquées', num(st.blocked), pct.toFixed(1).replace('.', ',') + ' %', hours.map(h => h[1]), 'var(--bad)')}
+        ${areaTile('#health', 'Latence moyenne (hors cache)', Math.round(st.avg_ms) + ' ms', 'hors cache', lat.length ? lat : [0, 0], 'var(--warn)')}
+        ${areaTile('#cache', 'Réponses du cache', num(st.cached), (st.total ? Math.round(st.cached / st.total * 100) : 0) + ' %', st.hours_cached || [0, 0], 'var(--vio)')}
       </div>
+      <p class="muted" style="margin-bottom:14px">${num(info.rules_loaded)} règles chargées · ${cl.peers.length + 1} nœud(s)</p>
       <div class="card"><h2>Requêtes par heure <span class="row muted" style="font-weight:400;font-size:12px"><span><span class="dot" style="background:var(--accent)"></span>autorisées</span><span><span class="dot" style="background:var(--bad)"></span>bloquées</span></span></h2>
-        <svg class="bars" viewBox="0 0 ${W} ${H}" role="img" aria-label="Requêtes par heure" style="width:100%;height:auto">${svg}</svg></div>
+        ${chart}</div>
       <div class="cols" style="margin-top:14px">
         <div class="card"><h2>Domaines les plus demandés</h2>${rank(st.top_domains, '')}</div>
         <div class="card"><h2>Domaines les plus bloqués</h2>${rank(st.top_blocked, 'bl')}</div>
@@ -133,14 +183,17 @@ pages.dashboard = async function (token) {
 
 pages.log = async function (token) {
   main.innerHTML = `<div class="head"><div><h1>Journal des requêtes</h1><p>Répliqué entre les nœuds. Les entrées les plus récentes sont en haut.</p></div></div>
-    <div class="card"><div class="filters">
-      <label class="lbl grow2">Recherche<input class="f" id="q" placeholder="Domaine, règle, liste, upstream…"></label>
+    <div class="card"><div class="fbar">
+      <label class="lbl grow">Recherche<input class="f" id="q" placeholder="Domaine, règle, liste, upstream…"></label>
       <label class="lbl">Résultat<select class="f" id="st"><option value="">Tous</option><option value="blocked">Bloquées</option><option value="allowed">Autorisées</option><option value="rewritten">Réécrites</option><option value="zone">Zone locale</option><option value="cached">Depuis le cache</option><option value="error">Erreurs</option></select></label>
+      <label class="lbl">Période<select class="f" id="pe"><option value="0">Tout</option><option value="15">15 dernières minutes</option><option value="60">Dernière heure</option><option value="360">6 dernières heures</option><option value="1440">24 dernières heures</option><option value="10080">7 derniers jours</option><option value="custom">Personnalisée…</option></select></label>
+      <button class="btn" id="advbtn" type="button" aria-expanded="false">Plus de filtres ▾</button>
+    </div>
+    <div class="filters advf" id="advf" hidden>
       <label class="lbl">Nœud<select class="f" id="nd"><option value="">Tous</option></select></label>
       <label class="lbl">Client enregistré<select class="f" id="cs"><option value="">Tous</option></select></label>
       <label class="lbl">Adresse IP<input class="f" id="cl" list="clients" placeholder="192.168.1.20"><datalist id="clients"></datalist></label>
       <label class="lbl">Type<select class="f" id="ty"><option value="">Tous</option></select></label>
-      <label class="lbl">Période<select class="f" id="pe"><option value="0">Tout</option><option value="15">15 dernières minutes</option><option value="60">Dernière heure</option><option value="360">6 dernières heures</option><option value="1440">24 dernières heures</option><option value="10080">7 derniers jours</option><option value="custom">Personnalisée…</option></select></label>
       <label class="lbl" id="fromw" hidden>Du<input class="f" id="from" type="datetime-local"></label>
       <label class="lbl" id="tow" hidden>Au<input class="f" id="to" type="datetime-local"></label>
       <label class="lbl">Afficher<select class="f" id="li"><option>100</option><option selected>200</option><option>500</option><option>1000</option></select></label>
@@ -196,15 +249,34 @@ pages.log = async function (token) {
     if ($('#pe').value !== '0') active.push($('#pe').selectedOptions[0].text.toLowerCase());
     $('#chips').innerHTML = active.map(a => `<span class="tag acc">${esc(a)}</span>`).join('');
     shown = rows;
-    $('#lb').innerHTML = rows.length ? rows.map((r, i) => `<tr>
+    $('#lb').innerHTML = rows.length ? rows.map((r, i) => `<tr class="${r.result === 'blocked' ? 'blk' : ''}">
       <td class="mono" title="${esc(new Date(r.ts).toLocaleString('fr-FR'))}">${stamp(r.ts)}</td><td class="mono" title="${esc(r.name)}">${esc(r.name)}</td><td>${esc(r.qtype)}</td>
       <td class="mono"><a href="#" class="plain" data-fcl="${esc(r.client)}" title="Filtrer sur cette adresse">${esc(r.client)}</a>${cname(r.client) ? ` <b style="font-family:var(--sans)">${esc(cname(r.client))}</b>` : ''}</td>
       <td>${esc(names[r.node] || r.node)}</td><td>${resTag(r.result, r.cached)}</td>
-      <td class="wrap muted mono">${r.ad ? '<span class="tag ok" title="Réponse validée par DNSSEC">DNSSEC</span> ' : ''}${esc(r.reason || r.list || r.upstream)}</td><td>${r.ms} ms</td>
-      <td class="row" style="flex-wrap:nowrap"><button class="btn sm" data-why="${i}">Pourquoi ?</button>${r.result === 'blocked' ? `<button class="btn sm" data-w data-allow="${esc(r.name)}">Autoriser</button>` : r.result === 'allowed' || r.result === 'error' ? `<button class="btn sm" data-w data-block="${esc(r.name)}">Bloquer</button>` : ''}</td></tr>`).join('')
+      <td class="wrap muted mono" title="${esc([r.reason, r.list, r.upstream].filter(Boolean).join(' · '))}">${r.ad ? '<span class="tag ok" title="Réponse validée par DNSSEC">DNSSEC</span> ' : ''}${esc(r.reason || r.list || r.upstream)}</td><td>${r.ms} ms</td>
+      <td><button class="btn sm kebab" data-menu="${i}" aria-label="Actions" aria-haspopup="menu">⋯</button></td></tr>`).join('')
       : '<tr><td colspan="9" class="empty">Aucune requête ne correspond à ces filtres</td></tr>';
   }
   main.onclick = guard(async e => {
+    const km = e.target.closest('[data-menu]');
+    if (km) {
+      const r = shown[+km.dataset.menu];
+      const addRule = async rule => {
+        const cur = (await get('c/rules')).find(x => x.id === 'main');
+        await api('PUT', 'c/rules/main', { text: (((cur && cur.text) || '').replace(/\s*$/, '') + '\n' + rule + '\n').replace(/^\n/, '') });
+        toast('Règle ajoutée : ' + rule);
+      };
+      const temp = (label, minutes) => ({ label, run: async () => { await api('POST', 'tempallow', { domain: r.name, minutes }); toast(`${r.name} autorisé temporairement`); } });
+      const items = [{ label: 'Pourquoi cette requête ?', run: () => showWhy(r, $('#why'), names) }];
+      if (r.result === 'blocked' && r.list !== 'Accès réseau') {
+        items.push('-', { label: 'Autoriser pour toujours', run: () => addRule(`@@||${r.name}^`) }, temp('Autoriser 15 minutes', 15), temp('Autoriser 1 heure', 60), temp('Autoriser 1 jour', 1440));
+        if (r.reason && !/^(autorisation|réécriture)/i.test(r.reason)) items.push({ label: 'Désactiver cette règle', run: () => addRule((r.reason.includes('$') ? r.reason + ',badfilter' : r.reason + '$badfilter')) });
+      } else if (r.result === 'allowed' || r.result === 'error') items.push('-', { label: 'Bloquer ce domaine', danger: true, run: () => addRule(`||${r.name}^`) });
+      items.push('-', { label: 'Filtrer sur ce client', run: () => { $('#cl').value = r.client; draw(); } }, { label: 'Copier le domaine', run: async () => { try { await navigator.clipboard.writeText(r.name); toast('Domaine copié'); } catch { toast(r.name); } } });
+      openMenu(km, items);
+      return;
+    }
+    if (e.target.id === 'advbtn') { const a = $('#advf'); a.hidden = !a.hidden; e.target.setAttribute('aria-expanded', String(!a.hidden)); e.target.textContent = a.hidden ? 'Plus de filtres ▾' : 'Moins de filtres ▴'; return; }
     const wy = e.target.closest('[data-why]');
     if (wy) { await showWhy(shown[+wy.dataset.why], $('#why'), names); return; }
     const tmp = e.target.closest('[data-tmp]');
@@ -249,7 +321,8 @@ pages.filters = async function (token) {
   main.innerHTML = `<div class="head"><div><h1>Listes de filtrage</h1><p>Listes synchronisées (syntaxe AdGuard, hosts ou liste de domaines) et listes locales. Chaque nœud télécharge ses listes lui-même. Une liste peut ne s'appliquer qu'à certains clients ou groupes.</p></div>
     <button class="btn" id="refall">Tout synchroniser</button></div>
     <div class="card"><h2>Listes</h2><div class="tblwrap"><table><thead><tr><th>Actif</th><th>Nom</th><th>S'applique à</th><th>Source</th><th>Règles</th><th>Synchro</th><th>État</th><th></th></tr></thead><tbody id="lt"></tbody></table></div></div>
-    <div class="card" id="lform"><h2 id="fh">Ajouter une liste</h2>
+    <div class="row" style="margin:14px 0"><button class="btn pri" id="lnew">+ Ajouter une liste</button></div>
+    <div class="card" id="lform" hidden><h2 id="fh">Ajouter une liste</h2>
       <div class="row" style="margin-bottom:12px"><div class="seg" id="kind"><button class="on" data-k="url">Depuis une URL</button><button data-k="inline">Texte ou fichier</button></div></div>
       <div class="cols">
         <div class="stack"><label class="lbl">Nom<input class="f" id="ln" placeholder="Ma liste"></label>
@@ -278,7 +351,7 @@ pages.filters = async function (token) {
         <td class="mono muted" title="${esc(l.url)}">${l.kind === 'url' ? esc(l.url.replace(/^https?:\/\//, '').slice(0, 44)) : 'texte local'}</td>
         <td>${count}${m.unsupported ? ` <span class="muted" title="Règles ignorées : modificateurs non gérés">(${num(m.unsupported)} ignorées)</span>` : ''}</td>
         <td>${l.kind === 'url' ? ago(m.updated_at) : ago(l.updated_at)}</td><td>${st}</td>
-        <td class="row"><button class="btn sm" data-edit="${l.id}">Modifier</button>${l.kind === 'url' ? `<button class="btn sm" data-ref="${l.id}">Synchroniser</button>` : ''}<button class="btn sm danger" data-del="${l.id}">Supprimer</button></td></tr>`;
+        <td><button class="btn sm kebab" data-rowmenu="${esc(JSON.stringify([['Modifier', 'edit', l.id], ...(l.kind === 'url' ? [['Synchroniser maintenant', 'ref', l.id]] : []), ['Supprimer', 'del', l.id, 1]]))}" aria-label="Actions" aria-haspopup="menu">⋯</button></td></tr>`;
     }).join('') : '<tr><td colspan="8" class="empty">Aucune liste</td></tr>';
   }
   function setKind(k) {
@@ -291,6 +364,7 @@ pages.filters = async function (token) {
     ['ln', 'lu', 'lc'].forEach(i => ($('#' + i).value = ''));
     scope.set({}); $('#li').value = '12'; $('#fh').textContent = 'Ajouter une liste'; $('#ladd').textContent = 'Ajouter';
     $('#lcancel').hidden = true; $('#kind').hidden = false; setKind('url');
+    $('#lform').hidden = true;
   }
   function startEdit(id) {
     const l = lists.find(x => x.id === id); if (!l) return;
@@ -300,8 +374,10 @@ pages.filters = async function (token) {
     $('#li').value = String(l.interval_hours);
     $('#fh').textContent = 'Modifier la liste'; $('#ladd').textContent = 'Enregistrer';
     $('#lcancel').hidden = false; $('#kind').hidden = true;
+    $('#lform').hidden = false;
     $('#lform').scrollIntoView({ behavior: 'smooth', block: 'center' }); $('#ln').focus();
   }
+  $('#lnew').onclick = () => { resetForm(); $('#lform').hidden = false; $('#lform').scrollIntoView({ behavior: 'smooth', block: 'center' }); $('#ln').focus(); };
   $('#kind').onclick = e => { const b = e.target.closest('button'); if (b) setKind(b.dataset.k); };
   $('#lcancel').onclick = resetForm;
   $('#lf').onchange = e => { const f = e.target.files[0]; if (f) { f.text().then(t => { $('#lc').value = t; if (!$('#ln').value) $('#ln').value = f.name; }); } };
@@ -343,10 +419,12 @@ pages.filters = async function (token) {
 
 pages.dns = async function (token) {
   main.innerHTML = `<div class="head"><div><h1>Paramètres DNS</h1><p>Les upstreams sont essayés dans l'ordre de la liste. Glisse une ligne ou utilise les flèches pour changer la priorité.</p></div></div>
+    <div class="tabsbar" id="dtabs" role="tablist"><button data-t="up" role="tab">Upstreams</button><button data-t="cache" role="tab">Cache</button><button data-t="block" role="tab">Blocage</button><button data-t="dnssec" role="tab">DNSSEC</button></div>
+    <div data-p="up">
     <div class="card"><h2>Upstreams <span class="row"><div class="seg" id="mode"><button data-m="ordered">Par priorité</button><button data-m="parallel">En parallèle</button></div></span></h2>
       <div class="tblwrap"><table><thead><tr><th></th><th>Priorité</th><th>Actif</th><th>État</th><th>Nom</th><th>Adresse</th><th>Latence</th><th></th></tr></thead><tbody id="ut"></tbody></table></div>
       <p class="note" style="margin-top:12px" id="modenote"></p></div>
-    <div class="card"><h2 id="uh">Ajouter un upstream</h2>
+    <div class="card" style="margin-top:14px"><h2 id="uh">Ajouter un upstream</h2>
       <div class="cols"><div class="stack">
         <label class="lbl">Nom<input class="f" id="un" placeholder="Mon résolveur"></label>
         <label class="lbl">Adresse<input class="f" id="ua" placeholder="1.1.1.1 · tls://dns.quad9.net · https://dns.google/dns-query"></label>
@@ -355,15 +433,31 @@ pages.dns = async function (token) {
         <label class="row" style="gap:8px"><input type="checkbox" id="ubk"> <span>Upstream de secours : interrogé seulement si les autres n'ont pas répondu (par exemple la box)</span></label>
         <div class="row"><button class="btn pri" id="usave">Ajouter</button><button class="btn" id="utest">Tester</button><button class="btn" id="ucancel" hidden>Annuler</button><span id="ures" class="muted"></span></div></div>
         <div class="note">Formats : <span class="mono">8.8.8.8</span> (UDP), <span class="mono">tcp://8.8.8.8</span>, <span class="mono">tls://dns.google</span> (DoT), <span class="mono">https://dns.google/dns-query</span> (DoH). Avec des domaines dédiés, l'upstream ne sert que pour ces domaines : utile pour envoyer <span class="mono">lan</span> vers ton routeur.</div></div></div>
-    <div class="cols" style="margin-top:14px">
-      <div class="card"><h2>Blocage</h2><label class="lbl">Réponse pour un domaine bloqué<select class="f" id="bm"><option value="null_ip">Adresse nulle (0.0.0.0)</option><option value="nxdomain">NXDOMAIN</option><option value="refused">REFUSED</option></select></label></div>
-      <div class="card"><h2>DNSSEC</h2><div class="row">${sw(false, 'id="dsec"')}<span>Demander la validation DNSSEC aux upstreams</span></div>
-        <p class="note" style="margin-top:12px">Atom demande à l'upstream de valider les signatures (bits DO et AD) et signale dans le journal les réponses authentifiées. La validation est faite par l'upstream, pas par Atom : choisis des upstreams qui valident (Cloudflare, Quad9, Google). Une réponse falsifiée est alors refusée (SERVFAIL). Les enregistrements de signature peuvent alourdir les réponses.</p></div>
-      <div class="card"><h2>Cache <span class="row"><button class="btn sm" id="flush">Vider</button></span></h2>
-        <div class="row">${sw(true, 'id="ce"')}<span>Cache activé</span></div>
-        <label class="lbl" style="margin-top:10px">Taille maximale (entrées)<input class="f" id="cs" type="number" min="100"></label>
-        <label class="lbl" style="margin-top:10px">Délai d'attente par upstream (ms)<input class="f" id="ct" type="number" min="200" step="100"></label>
-        <div class="row" style="margin-top:12px"><button class="btn pri" id="csave">Enregistrer</button></div></div></div>`;
+    </div>
+    <div data-p="cache" hidden><div class="card"><h2>Cache et délais <span class="row"><button class="btn sm" id="flush">Vider le cache</button></span></h2>
+        <div class="stack" style="max-width:460px"><div class="row">${sw(true, 'id="ce"')}<span>Cache activé</span></div>
+        <label class="lbl">Taille maximale (entrées)<input class="f" id="cs" type="number" min="100"></label>
+        <label class="lbl">Délai d'attente par upstream (ms)<input class="f" id="ct" type="number" min="200" step="100"></label>
+        <div class="row"><button class="btn pri savebtn">Enregistrer</button></div>
+        <p class="note">Le cache est propre à chaque nœud. Il est vidé quand les upstreams ou DNSSEC changent.</p></div></div></div>
+    <div data-p="block" hidden><div class="card"><h2>Blocage</h2><div class="stack" style="max-width:460px"><label class="lbl">Réponse pour un domaine bloqué<select class="f" id="bm"><option value="null_ip">Adresse nulle (0.0.0.0)</option><option value="nxdomain">NXDOMAIN</option><option value="refused">REFUSED</option></select></label>
+        <div class="row"><button class="btn pri savebtn">Enregistrer</button></div>
+        <p class="note">Adresse nulle : le navigateur échoue tout de suite. NXDOMAIN : le nom « n'existe pas ». REFUSED : le serveur refuse de répondre (certains appareils réessayent plus longtemps).</p></div></div></div>
+    <div data-p="dnssec" hidden><div class="card"><h2>DNSSEC</h2><div class="stack" style="max-width:640px"><div class="row">${sw(false, 'id="dsec"')}<span>Demander la validation DNSSEC aux upstreams</span></div>
+        <div class="row"><button class="btn pri savebtn">Enregistrer</button></div>
+        <p class="note">Atom demande à l'upstream de valider les signatures (bits DO et AD) et signale dans le journal les réponses authentifiées. La validation est faite par l'upstream, pas par Atom : choisis des upstreams qui valident (Cloudflare, Quad9, Google). Une réponse falsifiée est alors refusée (SERVFAIL). Les enregistrements de signature peuvent alourdir les réponses.</p></div></div></div>`;
+  {
+    let tab = 'up';
+    try { tab = sessionStorage.getItem('atom-dns-tab') || 'up'; } catch { /* ignoré */ }
+    const show = t => {
+      tab = t;
+      $$('#dtabs button').forEach(b => { b.classList.toggle('on', b.dataset.t === t); b.setAttribute('aria-selected', String(b.dataset.t === t)); });
+      $$('[data-p]').forEach(p => (p.hidden = p.dataset.p !== t));
+      try { sessionStorage.setItem('atom-dns-tab', t); } catch { /* ignoré */ }
+    };
+    $('#dtabs').onclick = e => { const b = e.target.closest('button'); if (b) show(b.dataset.t); };
+    show(tab);
+  }
   let ups = [], health = {}, editing = null, set = {};
   async function load() {
     [ups, health, set] = await Promise.all([get('c/upstreams'), get('upstreams/status'), getSettings()]);
@@ -386,7 +480,7 @@ pages.dns = async function (token) {
         <td>${sw(u.enabled, `data-tog="${u.id}"`)}</td><td>${state}</td>
         <td>${esc(u.name)}${u.domains.length ? ` <span class="tag acc">${esc(u.domains.join(', '))}</span>` : ''}${u.backup ? ' <span class="tag warn" title="Interrogé seulement si les autres upstreams échouent">secours</span>' : ''}</td>
         <td class="mono">${esc(u.address)}</td><td class="mono">${u.enabled && h.latency_ms != null && h.up ? h.latency_ms + ' ms' : '–'}</td>
-        <td class="row" style="flex-wrap:nowrap"><button class="btn sm" data-t="${u.id}">Tester</button><button class="btn sm" data-edit="${u.id}">Modifier</button><button class="btn sm danger" data-del="${u.id}">Supprimer</button></td></tr>`;
+        <td><button class="btn sm kebab" data-rowmenu="${esc(JSON.stringify([['Tester', 't', u.id], ['Modifier', 'edit', u.id], ['Supprimer', 'del', u.id, 1]]))}" aria-label="Actions" aria-haspopup="menu">⋯</button></td></tr>`;
     }).join('') : '<tr><td colspan="8" class="empty">Aucun upstream : aucune requête ne pourra être résolue.</td></tr>';
     if (document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'SELECT') {
       $('#bm').value = set.block_mode; $('#dsec').checked = !!set.dnssec; $('#ce').checked = set.cache_enabled; $('#cs').value = set.cache_size; $('#ct').value = set.timeout_ms;
@@ -414,10 +508,11 @@ pages.dns = async function (token) {
     toast('Upstream enregistré'); resetForm(); await load(); draw();
   });
   $('#mode').onclick = guard(async e => { const b = e.target.closest('button'); if (!b) return; await saveSettings({ upstream_mode: b.dataset.m }); set.upstream_mode = b.dataset.m; draw(); });
-  $('#csave').onclick = guard(async () => {
+  const saveAll = guard(async () => {
     await saveSettings({ block_mode: $('#bm').value, dnssec: $('#dsec').checked, cache_enabled: $('#ce').checked, cache_size: +$('#cs').value, timeout_ms: +$('#ct').value });
     toast('Réglages enregistrés'); await load(); draw();
   });
+  $$('.savebtn').forEach(b => (b.onclick = saveAll));
   $('#flush').onclick = guard(async () => { await api('POST', 'cache/flush'); toast('Cache vidé'); });
   main.onclick = guard(async e => {
     const t = e.target.closest('button'); if (!t) return;
@@ -483,7 +578,7 @@ pages.records = async function (token) {
   main.innerHTML = `<div class="head"><div><h1>Enregistrements DNS</h1><p>Atom répond avec autorité pour les zones ci-dessous. Un nom absent d'une zone locale reçoit NXDOMAIN, sans interroger les upstreams.</p></div></div>
     <div class="card"><h2>Zones</h2><div class="row"><div class="seg" id="zs"></div><input class="f" id="zn" style="width:200px" placeholder="maison.lan" aria-label="Nouvelle zone"><button class="btn" id="zadd">Créer la zone</button></div></div>
     <div id="zbody"></div>`;
-  let zones = [], recs = [], zone = null, editing = null, q = '', scopeCtl = null;
+  let zones = [], recs = [], zone = null, editing = null, q = '', tf = '', scopeCtl = null;
   async function load() { [zones, recs] = await Promise.all([get('c/zones'), get('c/records'), loadDir()]); if (!zone || !zones.find(z => z.name === zone)) zone = zones[0] ? zones[0].name : null; }
   const TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'SRV', 'PTR', 'NS', 'CAA'];
   const HINT = { A: '192.168.1.20', AAAA: 'fd00::20', CNAME: 'cible.maison.lan', MX: '10 mail.maison.lan', TXT: 'texte libre', SRV: '0 5 1883 hote.maison.lan', PTR: 'nas.maison.lan', NS: 'ns.maison.lan', CAA: '0 issue "letsencrypt.org"' };
@@ -491,17 +586,21 @@ pages.records = async function (token) {
     if (!$('#rtb')) return;
     const all = recs.filter(r => r.zone === zone).sort((a, b) => a.name.localeCompare(b.name) || a.type.localeCompare(b.type));
     const term = q.trim().toLowerCase();
-    const rs = term ? all.filter(r => [r.name || '@', r.name ? `${r.name}.${zone}` : zone, r.type, r.value].join(' ').toLowerCase().includes(term)) : all;
-    $('#rcount').textContent = term ? `${rs.length} sur ${all.length}` : `${all.length} enregistrement(s)`;
+    const byType = tf ? all.filter(r => r.type === tf) : all;
+    const counts = {}; all.forEach(r => (counts[r.type] = (counts[r.type] || 0) + 1));
+    $('#tchips').innerHTML = ['', ...TYPES.filter(t => counts[t])].map(t => `<button type="button" class="chip ${tf === t ? 'on' : ''}" data-tf="${t}">${t || 'Tous'}${t ? ` <span class="muted">${counts[t]}</span>` : ` <span class="muted">${all.length}</span>`}</button>`).join('');
+    const rs = term ? byType.filter(r => [r.name || '@', r.name ? `${r.name}.${zone}` : zone, r.type, r.value].join(' ').toLowerCase().includes(term)) : all;
+    $('#rcount').textContent = term || tf ? `${rs.length} sur ${all.length}` : `${all.length} enregistrement(s)`;
     $('#rtb').innerHTML = rs.length ? rs.map(r => `<tr><td>${sw(r.enabled, `data-tog="${r.id}"`)}</td><td><span class="tag acc">${r.type}</span></td><td class="mono">${esc(r.name || '@')}</td><td class="mono wrap">${esc(r.value)}</td><td>${r.ttl} s</td><td>${r.type === 'A' ? sw(r.ptr, `data-ptr="${r.id}"`) : ''}</td><td>${scopeTags(r)}</td>
-      <td class="row" style="flex-wrap:nowrap"><button class="btn sm" data-edit="${r.id}">Modifier</button><button class="btn sm danger" data-del="${r.id}">Supprimer</button></td></tr>`).join('')
-      : `<tr><td colspan="8" class="empty">${all.length ? 'Aucun enregistrement ne correspond à la recherche' : 'Aucun enregistrement'}</td></tr>`;
+      <td><button class="btn sm kebab" data-rowmenu="${esc(JSON.stringify([['Modifier', 'edit', r.id], ['Supprimer', 'del', r.id, 1]]))}" aria-label="Actions" aria-haspopup="menu">⋯</button></td></tr>`).join('')
+      : `<tr><td colspan="8" class="empty">${all.length ? 'Aucun enregistrement ne correspond au filtre' : 'Aucun enregistrement'}</td></tr>`;
   }
   function draw() {
     if (token !== routeToken) return;
     $('#zs').innerHTML = zones.length ? zones.map(z => `<button data-z="${esc(z.name)}" class="${z.name === zone ? 'on' : ''}">${esc(z.name)}</button>`).join('') : '<span class="muted" style="padding:6px 12px">Aucune zone</span>';
     if (!zone) { $('#zbody').innerHTML = '<div class="card empty">Crée une première zone, par exemple <span class="mono">maison.lan</span>.</div>'; return; }
     $('#zbody').innerHTML = `<div class="card" style="margin-top:14px"><h2>${esc(zone)} <button class="btn sm danger" data-zdel="1">Supprimer la zone</button></h2>
+      <div class="chips" id="tchips" style="margin-bottom:10px" role="group" aria-label="Filtrer par type"></div>
       <div class="row" style="margin-bottom:12px"><input class="f grow" id="rq" type="search" placeholder="Rechercher par nom, type ou valeur" value="${esc(q)}" aria-label="Rechercher un enregistrement"><span class="muted" id="rcount"></span></div>
       <div class="tblwrap"><table><thead><tr><th>Actif</th><th>Type</th><th>Nom</th><th>Valeur</th><th>TTL</th><th>PTR</th><th>Portée</th><th></th></tr></thead><tbody id="rtb"></tbody></table></div></div>
       <div class="card" style="margin-top:14px"><h2 id="rh">Ajouter un enregistrement</h2><div class="row">
@@ -519,7 +618,8 @@ pages.records = async function (token) {
   main.onclick = guard(async e => {
     const t = e.target.closest('button'); if (!t) return;
     if (t.id === 'zadd') { const n = $('#zn').value; await api('POST', 'c/zones', { name: n }); zone = n.trim().toLowerCase().replace(/\.$/, ''); $('#zn').value = ''; toast('Zone créée'); await load(); draw(); }
-    else if (t.dataset.z) { zone = t.dataset.z; editing = null; draw(); }
+    else if (t.dataset.z) { zone = t.dataset.z; editing = null; tf = ''; draw(); }
+    else if (t.dataset.tf !== undefined) { tf = t.dataset.tf; renderRows(); }
     else if (t.dataset.zdel) {
       if (t.dataset.sure !== '1') { t.dataset.sure = '1'; t.textContent = 'Confirmer ? Les enregistrements seront supprimés'; return; }
       const z = zones.find(x => x.name === zone); await api('DELETE', `c/zones/${z.id}`); await load(); draw();
@@ -551,18 +651,24 @@ pages.records = async function (token) {
 pages.cluster = async function (token) {
   main.innerHTML = `<div class="head"><div><h1>Cluster</h1><p>Les nœuds appairés partagent la configuration et le journal en direct. Chacun reste utilisable seul si l'autre tombe.</p></div>
     <button class="btn" id="syncnow">Synchroniser maintenant</button></div><div id="cbody"></div>`;
+  let joinOpen = false;
   async function draw() {
-    const c = await get('cluster');
+    const [c, h] = await Promise.all([get('cluster'), get('health')]);
     if (token !== routeToken) return;
     const active = document.activeElement && document.activeElement.closest('#joinbox');
     if (active) return;
-    $('#cbody').innerHTML = `<div class="card"><h2>Nœuds</h2><div class="tblwrap"><table><thead><tr><th>Nœud</th><th>Adresse</th><th>État</th><th>Latence</th><th>Dernière synchro</th><th></th></tr></thead><tbody>
-      <tr><td><b>${esc(c.node.name)}</b> <span class="muted">(ce nœud)</span></td><td class="mono">${esc(c.node.advertise_url || location.origin)}</td><td><span class="dot up"></span>en ligne</td><td>–</td><td>–</td><td></td></tr>
-      ${c.peers.map(p => `<tr><td><b>${esc(p.name)}</b></td><td class="mono">${esc(p.url)}</td>
+    const hp = Object.fromEntries(h.peers.map(p => [p.id, p]));
+    const vtag = v => v ? `<span class="tag ${v !== h.self.version ? 'warn' : ''}">${esc(v)}</span>` : '<span class="muted">inconnue</span>';
+    $('#cbody').innerHTML = `<div class="card"><h2>Nœuds</h2><div class="tblwrap"><table><thead><tr><th>Nœud</th><th>Adresse</th><th>État</th><th>Version</th><th>Latence</th><th>Dernière synchro</th><th>Retard</th><th></th></tr></thead><tbody>
+      <tr><td><b>${esc(c.node.name)}</b> <span class="tag acc">ce nœud</span></td><td class="mono">${esc(c.node.advertise_url || location.origin)}</td><td><span class="dot up"></span>en ligne</td><td>${vtag(h.self.version)}</td><td>–</td><td>–</td><td>–</td><td></td></tr>
+      ${c.peers.map(p => { const q = hp[p.id] || {}; return `<tr><td><b>${esc(p.name)}</b></td><td class="mono">${esc(p.url)}</td>
         <td>${p.ok ? '<span class="dot up"></span>synchronisé' : `<span class="dot down"></span><span title="${esc(p.error || '')}">injoignable</span>`}</td>
-        <td>${p.ok ? p.latency_ms + ' ms' : '–'}</td><td>${ago(p.last_ok)}</td><td><button class="btn sm danger" data-rm="${p.id}">Retirer</button></td></tr>`).join('')}</tbody></table></div></div>
+        <td>${p.ok ? vtag(q.version) : '–'}</td><td>${p.ok ? p.latency_ms + ' ms' : '–'}</td><td>${ago(p.last_ok)}</td>
+        <td>${p.ok ? (q.behind_ops ? `<span class="tag warn">${q.behind_ops} modif.</span>` : '<span class="tag ok">à jour</span>') : '–'}</td>
+        <td><button class="btn sm danger" data-rm="${p.id}">Retirer</button></td></tr>`; }).join('')}</tbody></table></div>
+      <div class="row" style="margin-top:12px"><button class="btn pri" id="addnode">+ Ajouter un nœud</button><a class="btn" href="#health" style="text-decoration:none">Voir la santé du cluster</a></div></div>
       <div class="cols" style="margin-top:14px" id="joinbox">
-        <div class="card"><h2>Ajouter ce nœud à un cluster</h2><div class="stack">
+        <div class="card" id="joincard" ${joinOpen ? '' : 'hidden'}><h2>Ajouter ce nœud à un cluster</h2><div class="stack">
           <label class="lbl">Adresse de l'autre nœud<input class="f" id="ju" placeholder="http://192.168.1.2:3000 ou https://192.168.1.2:3443"></label>
           <label class="lbl">Code d'appairage de l'autre nœud (copie-le en entier, avec l'empreinte s'il y en a une)<input class="f" id="jt" placeholder="affiché sur son écran Cluster"></label>
           <label class="lbl">Adresse de ce nœud, telle que l'autre nœud peut la joindre<input class="f" id="js" value="${esc(c.node.advertise_url || location.origin)}"></label>
@@ -576,10 +682,11 @@ pages.cluster = async function (token) {
   }
   main.onclick = guard(async e => {
     const t = e.target.closest('button'); if (!t) return;
+    if (t.id === 'addnode') { joinOpen = !joinOpen; $('#joincard').hidden = !joinOpen; if (joinOpen) $('#ju').focus(); return; }
     if (t.id === 'syncnow') { await api('POST', 'cluster/sync'); toast('Synchronisation effectuée'); draw(); }
     else if (t.id === 'jgo') {
       t.disabled = true;
-      try { await api('POST', 'cluster/join', { url: $('#ju').value, token: $('#jt').value, self_url: $('#js').value }); toast('Nœud ajouté au cluster'); } finally { t.disabled = false; }
+      try { await api('POST', 'cluster/join', { url: $('#ju').value, token: $('#jt').value, self_url: $('#js').value }); toast('Nœud ajouté au cluster'); joinOpen = false; } finally { t.disabled = false; }
       draw();
     }
     else if (t.id === 'cp') { try { await navigator.clipboard.writeText($('#tk').textContent); toast('Code copié'); } catch { const r = document.createRange(); r.selectNodeContents($('#tk')); getSelection().removeAllRanges(); getSelection().addRange(r); toast('Sélectionné, copie avec Ctrl+C'); } }
