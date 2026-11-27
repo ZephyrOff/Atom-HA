@@ -18,6 +18,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/tempallow", post(tempallow_create))
         .route("/api/search", get(search))
         .route("/api/health", get(health))
+        .route("/api/listen", get(listen_get).post(listen_set))
 }
 
 // ---------- autorisation temporaire ----------
@@ -372,4 +373,48 @@ pub async fn run(app: Arc<App>) {
         certs_check(&app).await;
         tokio::time::sleep(Duration::from_secs(3600)).await;
     }
+}
+
+// ---------- adresses d'écoute ----------
+
+fn host_of(listen: &str) -> &str {
+    listen.rsplit_once(':').map_or(listen, |(h, _)| h)
+}
+
+fn port_of(listen: &str) -> &str {
+    listen.rsplit_once(':').map_or("", |(_, p)| p)
+}
+
+async fn listen_get(State(app): State<Arc<App>>) -> Res {
+    let n = app.node.lock();
+    Ok(Json(json!({
+        "dns": {"host": host_of(&app.cfg.dns_listen), "port": port_of(&app.cfg.dns_listen), "chosen": n.bind_dns},
+        "http": {"host": host_of(&app.cfg.http_listen), "port": port_of(&app.cfg.http_listen), "chosen": n.bind_http},
+        "ingress": app.cfg.trusted_ip.is_some(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct ListenReq {
+    dns: String,
+    http: String,
+}
+
+async fn listen_set(State(app): State<Arc<App>>, Extension(actor): Extension<Actor>, Json(r): Json<ListenReq>) -> Res {
+    for v in [&r.dns, &r.http] {
+        if !matches!(v.as_str(), "0.0.0.0" | "127.0.0.1") {
+            return Err(bad("l'adresse doit être 0.0.0.0 (tout le réseau) ou 127.0.0.1 (cette machine seulement)"));
+        }
+    }
+    if r.http == "127.0.0.1" && app.cfg.trusted_ip.is_some() {
+        return Err(bad("derrière l'accès Home Assistant (ingress), l'interface doit rester en 0.0.0.0 : sinon Home Assistant ne pourrait plus l'afficher"));
+    }
+    {
+        let mut n = app.node.lock();
+        n.bind_dns = r.dns.clone();
+        n.bind_http = r.http.clone();
+    }
+    app.save_node();
+    app.auth.event("", "listen", &format!("écoute DNS {} · interface {} (au prochain démarrage) par {}", r.dns, r.http, actor.0));
+    Ok(Json(json!({"ok": true, "restart": true})))
 }

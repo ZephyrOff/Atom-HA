@@ -219,6 +219,26 @@ pages.health = async function (token) {
     const set = guard(async pw => { await api('POST', 'auth/readonly', { password: pw }); toast(pw ? 'Accès en lecture seule enregistré' : 'Accès en lecture seule supprimé'); route(); });
     $('#rosave').onclick = () => set($('#rop').value);
     if ($('#rooff')) $('#rooff').onclick = () => set('');
+    // adresses d'écoute (DNS et interface web)
+    const L = await get('listen');
+    if (token !== routeToken) return;
+    const lc = document.createElement('div');
+    lc.className = 'card';
+    const opt = (cur, v, label) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${label}</option>`;
+    const sel = (id, cur, locked) => `<select class="f" id="${id}" ${locked ? 'disabled' : ''}>${opt(cur, '0.0.0.0', '0.0.0.0 : tout le réseau')}${opt(cur, '127.0.0.1', '127.0.0.1 : cette machine seulement')}</select>`;
+    lc.innerHTML = `<h2>Adresses d'écoute</h2>
+      <p class="muted" style="margin-bottom:10px">Choisis qui peut joindre le serveur DNS (port ${esc(L.dns.port)}) et l'interface web (port ${esc(L.http.port)}). En <b class="mono">127.0.0.1</b>, seule cette machine y accède. Le changement s'applique au prochain redémarrage d'Atom.</p>
+      <div class="cols"><label class="lbl">Serveur DNS${sel('lbd', L.dns.host)}</label>
+      <label class="lbl">Interface web${sel('lbh', L.http.host, L.ingress)}${L.ingress ? '<span class="muted">Imposé en 0.0.0.0 avec l’accès Home Assistant.</span>' : ''}</label></div>
+      <div class="row" style="margin-top:12px"><button class="btn pri" id="lbsave">Enregistrer</button><span class="muted" id="lbinfo">Actuellement : DNS ${esc(L.dns.host)} · web ${esc(L.http.host)}</span></div>`;
+    main.appendChild(lc);
+    $('#lbsave').onclick = guard(async () => {
+      const dns = $('#lbd').value, http = $('#lbh').value;
+      if (http === '127.0.0.1' && !confirm('Après le redémarrage, l’interface ne sera plus accessible depuis un autre appareil que cette machine. Continuer ?')) return;
+      await api('POST', 'listen', { dns, http });
+      toast('Enregistré : redémarre Atom pour appliquer');
+      $('#lbinfo').textContent = 'À appliquer : redémarre Atom (add-on, service ou conteneur).';
+    });
   };
 }
 

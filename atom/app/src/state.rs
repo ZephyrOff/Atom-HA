@@ -64,6 +64,26 @@ pub struct NodeFile {
     pub tls: crate::tls::TlsSettings,
     /// Adresse du nœud qui détient l'autorité du cluster (pour renouveler le certificat).
     pub ca_url: String,
+    /// Adresse d'écoute choisie depuis l'interface (« 0.0.0.0 » ou « 127.0.0.1 »), vide = valeur de la configuration.
+    pub bind_dns: String,
+    pub bind_http: String,
+}
+
+/// Remplace l'adresse (pas le port) d'une écoute `hôte:port`.
+pub fn with_host(listen: &str, host: &str) -> String {
+    if host.is_empty() {
+        return listen.to_string();
+    }
+    match listen.rsplit_once(':') {
+        Some((_, port)) => format!("{host}:{port}"),
+        None => listen.to_string(),
+    }
+}
+
+/// Applique les adresses d'écoute choisies dans l'interface (elles priment sur la configuration).
+pub fn apply_bind(cfg: &mut RunCfg, n: &NodeFile) {
+    cfg.dns_listen = with_host(&cfg.dns_listen, &n.bind_dns);
+    cfg.http_listen = with_host(&cfg.http_listen, &n.bind_http);
 }
 
 #[derive(Serialize, Clone, Debug, Default)]

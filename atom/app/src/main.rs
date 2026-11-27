@@ -81,9 +81,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let cfg = parse_args();
+    let mut cfg = parse_args();
     std::fs::create_dir_all(cfg.data_dir.join("lists"))?;
     let (node, generated) = state::load_node(&cfg)?;
+    state::apply_bind(&mut cfg, &node);
     if let Some(pw) = generated {
         tracing::warn!("Mot de passe administrateur généré (utilisateur « admin ») : {pw}");
     }

@@ -248,5 +248,5 @@ tr.blk td{background:color-mix(in srgb,var(--bad) 7%,transparent)}
 #logt th:last-child{background:var(--surface2)}
 #logt tr.blk td:last-child{background:color-mix(in srgb,var(--bad) 7%,var(--surface))}
 /* espacement minimal sous chaque bloc de page (fusionne avec les marges du haut existantes) */
-main>*:not(:last-child),[data-p]>*:not(:last-child),#dbody>*:not(:last-child),#cbody>*:not(:last-child){margin-bottom:14px}
+main>*:not(:last-child),[data-p]>*:not(:last-child),#dbody>*:not(:last-child),#cbody>*:not(:last-child),#hbody>*:not(:last-child),#zbody>*:not(:last-child){margin-bottom:14px}
 .head{margin-bottom:18px!important}
