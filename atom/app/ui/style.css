@@ -182,7 +182,6 @@ kbd{font:600 11px var(--mono);border:1px solid var(--line);border-bottom-width:2
 .sverdict{padding:10px;border:1px dashed var(--line);border-radius:8px;margin-bottom:6px;overflow-wrap:anywhere}
 .hbanner{display:block;text-decoration:none;color:inherit;margin-bottom:14px;border-left:4px solid var(--warn)}
 .hbanner.bad{border-left-color:var(--bad)}
-.stack:has(>.prob){margin-bottom:14px}
 .prob{border-left:4px solid var(--warn)}
 .prob.bad{border-left-color:var(--bad)}
 .prob.ok{border-left-color:var(--good)}
@@ -206,8 +205,9 @@ body.ro #nav a[data-r="cluster"],body.ro #nav a[data-r="certs"],body.ro #nav a[d
 .chart .plot{position:relative;height:clamp(150px,20vw,230px)}
 .chart .gl{position:absolute;left:0;right:0;border-top:1px solid var(--line)}
 .chart .cols{position:absolute;inset:0;display:flex;align-items:flex-end;gap:clamp(2px,.4vw,5px)}
-.chart .cols i{flex:1;min-width:2px;background:var(--accent);border-radius:3px 3px 0 0;position:relative}
-.chart .cols s{position:absolute;left:0;right:0;bottom:0;background:var(--bad);border-radius:0}
+.chart .cols i{flex:1;min-width:2px;background:color-mix(in srgb,var(--accent) 55%,transparent);border-radius:3px 3px 0 0;position:relative;transition:background .15s}
+.chart .cols i:hover{background:color-mix(in srgb,var(--accent) 80%,transparent)}
+.chart .cols s{position:absolute;left:0;right:0;bottom:0;background:color-mix(in srgb,var(--bad) 45%,transparent);border-radius:0}
 .chart .xax{grid-column:2;display:flex;gap:clamp(2px,.4vw,5px);font:clamp(10.5px,.5vw + 8px,12.5px) var(--mono);color:var(--muted)}
 .chart .xax span{flex:1;text-align:center;visibility:hidden;min-width:0}
 .chart .xax span.k{visibility:visible}
@@ -247,3 +247,6 @@ tr.blk td{background:color-mix(in srgb,var(--bad) 7%,transparent)}
 #logt th:last-child,#logt td:last-child{position:sticky;right:0;background:var(--surface);box-shadow:-8px 0 8px -8px rgba(0,0,0,.18)}
 #logt th:last-child{background:var(--surface2)}
 #logt tr.blk td:last-child{background:color-mix(in srgb,var(--bad) 7%,var(--surface))}
+/* espacement minimal sous chaque bloc de page (fusionne avec les marges du haut existantes) */
+main>*:not(:last-child),[data-p]>*:not(:last-child),#dbody>*:not(:last-child),#cbody>*:not(:last-child){margin-bottom:14px}
+.head{margin-bottom:18px!important}
